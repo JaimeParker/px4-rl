@@ -1,4 +1,4 @@
-// Time per position_step, attitude_step and rate_step call of the CUDA fleet, measured with CUDA events.
+// Time per position_step, attitude_step, rate_step and rotor_step call of the CUDA fleet, measured with CUDA events.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -100,6 +100,12 @@ void benchmark(int n)
 	float *d_motors = deviceScratch(4 * n);
 	float *d_actuator = deviceScratch(4 * n);
 	float *d_torque = deviceScratch(3 * n);
+	float *d_pwm = deviceBuffer(std::vector<float>(4 * n, 1694.f));
+	float *d_body_velocity = deviceBuffer(std::vector<float>(3 * n, 0.5f));
+	float *d_body_rates = deviceBuffer(std::vector<float>(3 * n, 0.1f));
+	float *d_force = deviceScratch(3 * n);
+	float *d_rotor_torque = deviceScratch(3 * n);
+	float *d_rotor_force = deviceScratch(12 * n);
 
 	// Velocity command in x at hover, 5 m above the origin.
 	std::vector<float> position(3 * n, 0.f), trajectory_sp(11 * n, NAN);
@@ -136,12 +142,18 @@ void benchmark(int n)
 		API_CALL(px4rl_cuda_rate_step(fleet, d_rates_sp, d_thrust_body, d_rates, d_accel, kDt, nullptr, d_motors,
 					      d_actuator, d_torque, nullptr));
 	});
-	std::printf("bench N=%6d: position_step %9.2f us/call, attitude_step %9.2f us/call, rate_step %9.2f us/call\n", n,
-		    position_us, attitude_us, rate_us);
+	const double rotor_us = microsecondsPerCall([&] {
+		API_CALL(px4rl_cuda_rotor_step(fleet, d_pwm, nullptr, d_body_velocity, d_body_rates, kDt, d_force,
+					       d_rotor_torque, d_rotor_force, nullptr));
+	});
+	std::printf("bench N=%6d: position_step %9.2f us/call, attitude_step %9.2f us/call, rate_step %9.2f us/call, "
+		    "rotor_step %9.2f us/call\n",
+		    n, position_us, attitude_us, rate_us, rotor_us);
 
 	for (float *p : {d_q, d_q_sp, d_thrust_sp, d_rates, d_accel, d_rates_sp, d_thrust_body, d_motors, d_actuator,
 			 d_torque, d_position, d_velocity, d_heading, d_az, d_trajectory_sp, d_q_sp_out, d_thrust_sp_out,
-			 d_yawspeed, d_hover_thrust}) {
+			 d_yawspeed, d_hover_thrust, d_pwm, d_body_velocity, d_body_rates, d_force,
+			 d_rotor_torque, d_rotor_force}) {
 		CUDA_CALL(cudaFree(p));
 	}
 

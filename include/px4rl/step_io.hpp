@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "px4rl/vehicle.hpp"
+#include "px4rl/vehicle_plant.hpp"
 
 namespace px4rl {
 
@@ -48,6 +49,17 @@ struct RateStepBuffers {
 	float *motors_out;            // n,4
 	float *actuator_out;          // n,4 or nullptr
 	float *torque_sp_out;         // n,3 or nullptr
+};
+
+struct RotorStepBuffers {
+	const float *actuator;         // n,PX4RL_MAX_ROTORS: PWM by PX4 output
+	const uint8_t *armed;          // n or nullptr (= all armed)
+	const float *body_velocity;    // n,3 body FLU, relative to the air
+	const float *body_rates;       // n,3 body FLU, or nullptr (= no omega x r term)
+	float dt;
+	float *force_out;              // n,3
+	float *torque_out;             // n,3
+	float *rotor_force_out;        // n,PX4RL_MAX_ROTORS,3 or nullptr
 };
 
 PX4RL_HD inline void positionStepAt(Vehicle &vehicle, int i, const PositionStepBuffers &b)
@@ -119,6 +131,27 @@ PX4RL_HD inline void rateStepAt(Vehicle &vehicle, int i, const RateStepBuffers &
 
 	if (b.torque_sp_out != nullptr) {
 		detail::store(b.torque_sp_out + 3 * i, result.torque_sp);
+	}
+}
+
+PX4RL_HD inline void rotorStepAt(VehiclePlant &plant, int i, const RotorStepBuffers &b)
+{
+	const matrix::Vector3f body_rates =
+		b.body_rates != nullptr ? detail::load(b.body_rates + 3 * i) : matrix::Vector3f(0.f, 0.f, 0.f);
+	RotorOutput per_rotor[PX4RL_MAX_ROTORS];
+
+	const Wrench wrench = plant.step(b.actuator + PX4RL_MAX_ROTORS * i, b.armed == nullptr || b.armed[i] != 0,
+					 detail::load(b.body_velocity + 3 * i), body_rates, b.dt,
+					 b.rotor_force_out != nullptr ? per_rotor : nullptr);
+
+	detail::store(b.force_out + 3 * i, wrench.force);
+	detail::store(b.torque_out + 3 * i, wrench.torque);
+
+	if (b.rotor_force_out != nullptr) {
+		for (int k = 0; k < PX4RL_MAX_ROTORS; ++k) {
+			detail::store(b.rotor_force_out + 3 * (PX4RL_MAX_ROTORS * i + k),
+				      k < plant.params.num_rotors ? per_rotor[k].force : matrix::Vector3f(0.f, 0.f, 0.f));
+		}
 	}
 }
 

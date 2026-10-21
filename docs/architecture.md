@@ -82,6 +82,21 @@ The controller side and the plant side deliberately use different sources:
 
 PX4 SITL itself flies with this mismatch, and also with `THR_MDL_FAC = 0` against a plant whose thrust is quadratic in rotor speed. px4-rl reproduces both by default. Every number is tabulated with its source in `docs/iris-params-sources.md`.
 
+The airframe is available as three functions, exported by `libpx4rl_cuda.so` as well as by the CPU library:
+- `px4rl_params_iris()`: the controller side. The defaults plus the `CA_ROTOR*` geometry of the airframe file. Its rotor positions, KM, axes and rotor count are those of `createQuadXIris()`, the default geometry. The only difference is CT, 6.5 (the control allocator's default, which the airframe leaves alone) against 1.0; the allocator normalises its mix matrix, so the motor commands are the same (checked in `tests/fleet`). The airframe's other lines (`MAV_TYPE`, `IMU_GYRO_RATEMAX`, `NAV_ACC_RAD`, `RTL_*`, `GPS_UBX_DYNMODEL`, `EKF2_RNG_FOG`, `MC_AT_EN`) do not affect the controller chain and are ignored; it sets no `MC_*`, `MPC_*` or `HTE_*` parameter.
+- `px4rl_plant_params_iris()` and `px4rl_rigid_body_params_iris()`: the plant side, from the SDF. PX4 output `i` drives SDF `rotor_i`.
+
+**Plant in the fleet.** Every vehicle owns a `VehiclePlant` (the plant parameters and the speed state of its rotors) in an array next to the `Vehicle` array, so a controller reset does not touch the rotors and `rotor_step` does not touch the controller state. A new fleet holds the Iris plant with the rotors at rest. `px4rl_cuda_rotor_step` scales the PWM from `rate_step` to the actuator value u = (pwm − 1000) / 1000, as PX4's simulation PWM driver does, runs the Gazebo motor model for each vehicle, and returns the force and torque on the body in FLU (and optionally the force of each rotor). The caller supplies the body velocity relative to the air and, optionally, the body rates (which add the ω × r term to each rotor's air velocity), and integrates the rigid body.
+
+**Closed loop.** `tests/closed_loop/iris_closed_loop_test.cpp` flies the CPU fleet against a 250 Hz ENU/FLU rigid body with the Iris mass and inertia, through the frame conversions. With the default `MPC_THR_HOVER = 0.5` and a plant that hovers at u = 0.6935:
+
+| Test | Result |
+|---|---|
+| Position hold at 10 m, 20 s | horizontal drift < 1e-4 m; \|altitude error\| ≤ 0.13 m after 5 s; no setpoint fallback |
+| Hover thrust estimate | 0.6938, against a measured collective thrust of 0.6935 (the estimator's ceiling is 0.7) |
+| 1 m/s velocity step from hover | no overshoot; error 0.012 m/s at 8 s; altitude deviation 0.011 m; yaw error < 1e-4 rad |
+| Acceleration hold with a +1 rad yaw step | yaw error 0.001 rad after 3 s |
+
 ## CPU vs GPU parity
 
 CUDA's transcendental functions (`sinf`, `acosf`, `atan2f`, …) differ from glibc's in the last ULPs, and FMA contraction adds further differences, so the two builds cannot be bitwise identical. `tests/parity/` defines and enforces agreement at three levels. It runs on 4096 vehicles, with per-vehicle parameters and a masked reset half-way through.
@@ -96,13 +111,15 @@ The open-loop growth is driven by discontinuities: the allocator's saturation fl
 
 ## Performance
 
-Benchmark: `bench/`, RTX 4090, CUDA 12.4. Times are µs per call for the whole fleet.
+Benchmark: `bench/`, RTX 4090, CUDA 12.4. Times are µs per call for the whole fleet. They come from a shared GPU and vary by about ±20 % between runs; the rate step measured 49–64 µs at 4 096 vehicles.
 
 | Vehicles | position step | attitude step | rate → allocator → output step |
 |---|---|---|---|
 | 4 096 | 19 | 4.5 | 49 |
 | 16 384 | 49 | 9.4 | 75 |
 | 65 536 | 202 | 29 | 370 |
+
+The rotor step (`px4rl_cuda_rotor_step`, PWM to wrench) takes 5.2 µs at 4 096 vehicles, 9.7 µs at 16 384 and 48 µs at 65 536.
 
 `Vehicle` is stored array-of-structures. Since the position loop was added it holds about 2 KB of controller state, and a rate step touches only part of it. Specialising the allocator to the actual rotor count and laying out hot state separately are the main levers for further speed.
 

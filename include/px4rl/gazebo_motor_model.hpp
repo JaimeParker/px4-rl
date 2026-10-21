@@ -169,10 +169,11 @@ PX4RL_HD inline void accumulateWrench(const px4rl_rotor_params &p, const RotorOu
 /// Steps every rotor of a plant and returns the summed wrench about the body origin.
 /// u_by_px4_output: actuator values indexed by PX4 output; rotor i reads
 /// u_by_px4_output[plant.rotor[i].px4_output_index]. The air velocity of each rotor is
-/// rotorAirVelocity() (body velocity plus omega x r).
+/// rotorAirVelocity() (body velocity plus omega x r). per_rotor, if not null, receives each rotor's
+/// RotorOutput (num_rotors entries, indexed by plant rotor).
 PX4RL_HD inline Wrench plantStep(const px4rl_plant_params &plant, RotorState *states, const float *u_by_px4_output,
 				 bool armed, const matrix::Vector3f &body_velocity,
-				 const matrix::Vector3f &body_angular_velocity, float dt)
+				 const matrix::Vector3f &body_angular_velocity, float dt, RotorOutput *per_rotor = nullptr)
 {
 	Wrench wrench;
 
@@ -181,6 +182,10 @@ PX4RL_HD inline Wrench plantStep(const px4rl_plant_params &plant, RotorState *st
 		const matrix::Vector3f v_air = rotorAirVelocity(p, body_velocity, body_angular_velocity);
 		const RotorOutput out = rotorStep(p, states[i], u_by_px4_output[p.px4_output_index], armed, v_air, dt);
 		accumulateWrench(p, out, wrench);
+
+		if (per_rotor != nullptr) {
+			per_rotor[i] = out;
+		}
 	}
 
 	return wrench;

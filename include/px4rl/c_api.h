@@ -110,6 +110,12 @@ typedef struct px4rl_params {
 /* Fills `p` from the px4_stack struct defaults, geometry createQuadXIris(). */
 PX4RL_API void px4rl_params_default(px4rl_params *p);
 
+/* Fills `p` with the controller parameters PX4 SITL flies the Gazebo Classic Iris with: the defaults of
+ * px4rl_params_default plus the CA_ROTOR* geometry of PX4's 10015_gazebo-classic_iris airframe. See
+ * docs/iris-params-sources.md and docs/architecture.md ("Iris airframe"). The plant side is
+ * px4rl_plant_params_iris() in airframes.h. */
+PX4RL_API void px4rl_params_iris(px4rl_params *p);
+
 /* ---- CUDA fleet (libpx4rl_cuda.so) ------------------------------------
  * Every call returns 0 on success. px4rl_last_error() describes the last
  * failure of the calling thread. `stream` is a cudaStream_t (NULL = default
@@ -184,6 +190,44 @@ PX4RL_API int px4rl_cuda_rate_step(px4rl_cuda_fleet *f,
 				   float *motors_out /*n,4 normalized [0,1]*/,
 				   float *actuator_out /*n,4 PWM/DShot value or NULL*/,
 				   float *torque_sp_out /*n,3 or NULL*/, void *stream);
+
+/* ---- Rotor plant (Gazebo Classic motor model) ----------------------------
+ * Every vehicle of the fleet also owns a plant: px4rl_plant_params (plant.h) and the speed state of its
+ * rotors. A new fleet holds the Iris plant (px4rl_plant_params_iris()) with the rotors at rest. The
+ * controller reset above leaves the plant untouched; px4rl_cuda_fleet_reset_plant replaces it. */
+
+struct px4rl_plant_params; /* defined in plant.h */
+
+/* plant_host: host array of n_plant structs, n_plant == 1 (broadcast) or n. mask: device uint8[n] or NULL
+ * (= all). Replaces the plant of the selected vehicles and puts their rotors at rest. */
+PX4RL_API int px4rl_cuda_fleet_reset_plant(px4rl_cuda_fleet *f, const uint8_t *mask,
+					   const struct px4rl_plant_params *plant_host, int n_plant, void *stream);
+
+/* Advances every vehicle's rotors by dt and returns the wrench on the body. FLU is the Gazebo / Isaac Lab
+ * body frame (x forward, y left, z up).
+ *
+ *   actuator            n x 4 PWM values by PX4 output index, as produced by rate_step's actuator_out. They
+ *                       are scaled to the actuator value u = (pwm - 1000) / (2000 - 1000), the scaling of PX4's
+ *                       simulation output driver, fixed at 1000 and 2000 whatever px4rl_params.pwm_min and
+ *                       pwm_max are. Each plant rotor reads the output named by its px4_output_index.
+ *   armed               uint8[n] or NULL (= all armed). A disarmed vehicle commands the rotors'
+ *                       zero_position_disarmed speed; PX4's driver does not scale its disarmed PWM (900).
+ *   body_velocity_flu   n x 3 velocity of the body relative to the air, body FLU (wind 0).
+ *   body_rates_flu      n x 3 body angular velocity, body FLU, or NULL. If given, each rotor's air velocity
+ *                       includes omega x r; if NULL the rotors see the body velocity.
+ *   dt                  seconds, > 0.
+ * Outputs, body FLU:
+ *   force_flu_out       n x 3 total force on the body, N
+ *   torque_flu_out      n x 3 total moment about the body origin (the centre of mass), N m
+ *   rotor_force_flu_out n x 4 x 3 force of each plant rotor (zero beyond num_rotors), or NULL
+ * Gravity and rigid-body integration are the caller's. Forces are computed from the rotor speeds before the
+ * step, then the speeds advance, as in Gazebo's UpdateForcesAndMoments. */
+PX4RL_API int px4rl_cuda_rotor_step(px4rl_cuda_fleet *f,
+				    const float *actuator /*n,4*/, const uint8_t *armed /*n or NULL*/,
+				    const float *body_velocity_flu /*n,3*/, const float *body_rates_flu /*n,3 or NULL*/,
+				    float dt,
+				    float *force_flu_out /*n,3*/, float *torque_flu_out /*n,3*/,
+				    float *rotor_force_flu_out /*n,4,3 or NULL*/, void *stream);
 
 #ifdef __cplusplus
 }

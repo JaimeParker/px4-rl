@@ -20,8 +20,14 @@
 // This is the plant side only. It is intentionally not reconciled with the controller's CA_ROTOR*
 // geometry (docs/architecture.md, "Iris airframe"): PX4 SITL runs the same mismatch.
 #include "px4rl/airframes.h"
+#include "px4rl/params.hpp"
 
 extern "C" {
+
+void px4rl_params_iris(px4rl_params *p)
+{
+	*p = px4rl::irisParams();
+}
 
 px4rl_plant_params px4rl_plant_params_iris(void)
 {

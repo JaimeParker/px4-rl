@@ -130,7 +130,9 @@ PX4RL_HD inline px4rl_params defaultParams()
 	p.yaw_by_differential_thrust_disabled = g.yaw_by_differential_thrust_disabled;
 	p.propeller_torque_disabled_non_upwards = g.propeller_torque_disabled_non_upwards;
 	p.three_dimensional_thrust_disabled = g.three_dimensional_thrust_disabled;
-	p.airmode = alloc.airmode;
+	// PX4's MC_AIRMODE default is 0 (src/lib/mixer_module/params.c:18, docs/iris-params-sources.md section 4).
+	// px4_stack's wrapper defaults to 1 (roll/pitch airmode), so the PX4 value is set here explicitly.
+	p.airmode = 0;
 	p.normalize_rpy = alloc.normalize_rpy;
 
 	const px4_stack::ActuatorOutputParams out;
@@ -181,6 +183,49 @@ PX4RL_HD inline px4rl_params defaultParams()
 	p.hte_thr_range = 0.2f;
 	p.hte_vxy_thr = 10.f;
 	p.hte_vz_thr = 2.f;
+	return p;
+}
+
+// Controller parameters of PX4 SITL's Gazebo Classic Iris: defaultParams() plus what airframe
+// ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris (and the rc.mc_defaults it sources)
+// sets for the controller chain; all lines are tabulated in docs/iris-params-sources.md, sections 3 and 5.
+//
+// Applied:
+//   CA_ROTOR0..3_PX / PY / KM (airframe lines 16-27) -> rotor_position x / y, rotor_km. The airframe leaves
+//   PZ, AX, AY, AZ and CT at the control allocator's defaults (module.yaml:160, 172, 183, 194, 209): PZ = 0,
+//   axis (0, 0, -1) (up in FRD), CT = 6.5.
+// Same as createQuadXIris(), which defaultParams() uses: every position, KM, axis and num_rotors. The only
+// difference is CT, 1.0 there against 6.5 here. The allocator normalises its mix matrix, so a uniform CT
+// cancels out (tests/fleet checks that the motor outputs agree).
+// Implied by the above: CA_AIRFRAME 0 (multirotor), CA_ROTOR_COUNT 4, and PWM_MAIN_FUNC1-4 = 101-104, which
+// connect output i to motor i, the order of rotor_position[].
+// Ignored, with no effect on the controller chain: MAV_TYPE, IMU_GYRO_RATEMAX (the caller sets the loop
+// rates), NAV_ACC_RAD, RTL_RETURN_ALT, RTL_DESCEND_ALT, GPS_UBX_DYNMODEL, EKF2_RNG_FOG (rc.mc_defaults) and
+// MC_AT_EN (init.d-posix/rcS:178, autotune).
+// No MC_* / MPC_* / HTE_* / THR_MDL_FAC override exists for this airframe: they keep PX4's defaults, as held
+// in defaultParams().
+PX4RL_HD inline px4rl_params irisParams()
+{
+	px4rl_params p = defaultParams();
+
+	const float position_x[4] = {0.1515f, -0.1515f, 0.1515f, -0.1515f};  // CA_ROTOR{0..3}_PX
+	const float position_y[4] = {0.245f, -0.1875f, -0.245f, 0.1875f};    // CA_ROTOR{0..3}_PY
+	const float moment_ratio[4] = {0.05f, 0.05f, -0.05f, -0.05f};        // CA_ROTOR{0..3}_KM
+	constexpr float kThrustCoefficient = 6.5f;                           // CA_ROTOR${i}_CT, module.yaml:209
+
+	p.num_rotors = 4;
+
+	for (int i = 0; i < 4; ++i) {
+		p.rotor_position[i][0] = position_x[i];
+		p.rotor_position[i][1] = position_y[i];
+		p.rotor_position[i][2] = 0.f;
+		p.rotor_axis[i][0] = 0.f;
+		p.rotor_axis[i][1] = 0.f;
+		p.rotor_axis[i][2] = -1.f;
+		p.rotor_ct[i] = kThrustCoefficient;
+		p.rotor_km[i] = moment_ratio[i];
+	}
+
 	return p;
 }
 

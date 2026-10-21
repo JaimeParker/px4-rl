@@ -16,6 +16,7 @@
 
 #include <matrix/matrix/math.hpp>
 
+#include "px4rl/airframes.h"
 #include "px4rl/c_api.h"
 #include "px4rl/cpu_fleet.hpp"
 
@@ -625,4 +626,167 @@ TEST(Parity, PositionChainCpuFleetVsCudaFleet)
 	expectChainSingleStep("first step after masked reset", fields, &ChainField::after_reset);
 	EXPECT_GT(outcome_counts[1], 0u);
 	EXPECT_GT(outcome_counts[2], 0u);
+}
+
+// Rotor plant: the same open-loop PWM, body velocity and body rates go to both fleets, whose plants have
+// per-vehicle motor constants. The rotor speed state follows its input within a few time constants, so the CPU
+// and GPU states agree to rounding before every step.
+TEST(Parity, RotorStepCpuFleetVsCudaFleet)
+{
+	std::vector<px4rl_plant_params> plants(kVehicles);
+
+	for (int i = 0; i < kVehicles; ++i) {
+		Rng rng{static_cast<uint32_t>(i) * 2654435761u + 777u};
+		plants[i] = px4rl_plant_params_iris();
+
+		for (int k = 0; k < plants[i].num_rotors; ++k) {
+			plants[i].rotor[k].motor_constant *= rng.range(0.9f, 1.1f);
+			plants[i].rotor[k].time_constant_up *= rng.range(0.8f, 1.2f);
+		}
+	}
+
+	std::vector<uint8_t> reset_mask(kVehicles), armed(kVehicles);
+
+	for (int i = 0; i < kVehicles; ++i) {
+		reset_mask[i] = (i % 7 == 0) ? 1 : 0;
+		armed[i] = (i % 11 != 0) ? 1 : 0;
+	}
+
+	px4rl::CpuFleet cpu(kVehicles);
+	cpu.resetPlant(nullptr, plants.data(), kVehicles);
+
+	px4rl_cuda_fleet *gpu = nullptr;
+	API_CALL(px4rl_cuda_fleet_create(kVehicles, 0, &gpu));
+	API_CALL(px4rl_cuda_fleet_reset_plant(gpu, nullptr, plants.data(), kVehicles, nullptr));
+
+	DeviceArray<float> d_actuator(4 * kVehicles), d_velocity(3 * kVehicles), d_rates(3 * kVehicles);
+	DeviceArray<float> d_force(3 * kVehicles), d_torque(3 * kVehicles), d_rotor_force(12 * kVehicles);
+	DeviceArray<uint8_t> d_armed(kVehicles), d_reset_mask(kVehicles);
+	d_armed.upload(armed);
+	d_reset_mask.upload(reset_mask);
+
+	std::vector<float> actuator(4 * kVehicles), velocity(3 * kVehicles), rates(3 * kVehicles);
+	std::vector<float> cpu_force(3 * kVehicles), cpu_torque(3 * kVehicles), cpu_rotor_force(12 * kVehicles);
+	std::vector<float> gpu_force, gpu_torque, gpu_rotor_force;
+
+	struct Worst {
+		double force{0.0}, torque{0.0}, rotor_force{0.0};
+		bool finite{true};
+	};
+	Worst first_step, after_plant_reset, all_steps;
+	double largest_force = 0.0, largest_torque = 0.0;
+
+	// max |cpu - gpu| / max(1, |cpu|) over the vehicles selected by `subset`.
+	const auto compare = [](const std::vector<float> &c, const std::vector<float> &g, int width,
+				const std::vector<uint8_t> *subset, double &worst, bool &finite) {
+		for (int i = 0; i < kVehicles; ++i) {
+			if (subset != nullptr && (*subset)[i] == 0) {
+				continue;
+			}
+
+			for (int k = 0; k < width; ++k) {
+				const float cv = c[width * i + k], gv = g[width * i + k];
+
+				if (!std::isfinite(cv) || !std::isfinite(gv)) {
+					finite = false;
+					continue;
+				}
+
+				worst = std::max(worst, std::fabs(static_cast<double>(cv) - static_cast<double>(gv)) /
+						       std::max(1.0, std::fabs(static_cast<double>(cv))));
+			}
+		}
+	};
+	const auto merge = [](Worst &into, const Worst &part) {
+		into.force = std::max(into.force, part.force);
+		into.torque = std::max(into.torque, part.torque);
+		into.rotor_force = std::max(into.rotor_force, part.rotor_force);
+		into.finite = into.finite && part.finite;
+	};
+
+	Rng rng{20261023u};
+
+	for (int t = 0; t < kSteps; ++t) {
+		if (t == kResetStep) {
+			cpu.resetPlant(reset_mask.data(), plants.data(), kVehicles);
+			API_CALL(px4rl_cuda_fleet_reset_plant(gpu, d_reset_mask.get(), plants.data(), kVehicles, nullptr));
+		}
+
+		// A new random command every 25 steps (0.1 s), constant in between, so the rotors reach steady speeds
+		// and the forces are large.
+		if (t % 25 == 0) {
+			for (float &v : actuator) {
+				v = std::floor(rng.range(1000.f, 2000.f));
+			}
+		}
+
+		for (float &v : velocity) {
+			v = rng.range(-5.f, 5.f);
+		}
+
+		for (float &v : rates) {
+			v = rng.range(-3.f, 3.f);
+		}
+
+		cpu.rotorStep(actuator.data(), armed.data(), velocity.data(), rates.data(), kDt, cpu_force.data(),
+			      cpu_torque.data(), cpu_rotor_force.data());
+
+		d_actuator.upload(actuator);
+		d_velocity.upload(velocity);
+		d_rates.upload(rates);
+		API_CALL(px4rl_cuda_rotor_step(gpu, d_actuator.get(), d_armed.get(), d_velocity.get(), d_rates.get(), kDt,
+					       d_force.get(), d_torque.get(), d_rotor_force.get(), nullptr));
+		d_force.download(gpu_force);
+		d_torque.download(gpu_torque);
+		d_rotor_force.download(gpu_rotor_force);
+
+		Worst this_step;
+		compare(cpu_force, gpu_force, 3, nullptr, this_step.force, this_step.finite);
+		compare(cpu_torque, gpu_torque, 3, nullptr, this_step.torque, this_step.finite);
+		compare(cpu_rotor_force, gpu_rotor_force, 12, nullptr, this_step.rotor_force, this_step.finite);
+		merge(all_steps, this_step);
+
+		if (t == 1) {
+			merge(first_step, this_step);
+		}
+
+		if (t == kResetStep + 1) {
+			Worst reset_vehicles;
+			compare(cpu_force, gpu_force, 3, &reset_mask, reset_vehicles.force, reset_vehicles.finite);
+			compare(cpu_torque, gpu_torque, 3, &reset_mask, reset_vehicles.torque, reset_vehicles.finite);
+			compare(cpu_rotor_force, gpu_rotor_force, 12, &reset_mask, reset_vehicles.rotor_force,
+				reset_vehicles.finite);
+			merge(after_plant_reset, reset_vehicles);
+		}
+
+		for (float f : cpu_force) {
+			largest_force = std::max(largest_force, static_cast<double>(std::fabs(f)));
+		}
+
+		for (float m : cpu_torque) {
+			largest_torque = std::max(largest_torque, static_cast<double>(std::fabs(m)));
+		}
+	}
+
+	API_CALL(px4rl_cuda_fleet_destroy(gpu));
+
+	std::printf("\nparity_test (rotor step): %d vehicles, %d steps, open loop, plant reset of i %% 7 == 0 at step %d, i %% 11 "
+		    "== 0 disarmed; max |d| / max(1, |cpu|) of force / torque / per-rotor force:\n",
+		    kVehicles, kSteps, kResetStep);
+	std::printf("  step 1 (after one step from rest):    %.3e / %.3e / %.3e\n", first_step.force, first_step.torque,
+		    first_step.rotor_force);
+	std::printf("  step after the masked plant reset:    %.3e / %.3e / %.3e\n", after_plant_reset.force,
+		    after_plant_reset.torque, after_plant_reset.rotor_force);
+	std::printf("  all %d steps:                        %.3e / %.3e / %.3e (largest cpu |force| %.2f N, |torque| %.2f N m)\n",
+		    kSteps, all_steps.force, all_steps.torque, all_steps.rotor_force, largest_force, largest_torque);
+
+	EXPECT_TRUE(all_steps.finite);
+	EXPECT_GT(largest_force, 10.0) << "the run should produce hover-sized forces";
+
+	// Only single-step agreement is bounded; the maximum over the whole run is printed above.
+	for (const Worst *w : {&first_step, &after_plant_reset}) {
+		EXPECT_LE(w->force, 1e-4);
+		EXPECT_LE(w->torque, 1e-4);
+		EXPECT_LE(w->rotor_force, 1e-4);
+	}
 }

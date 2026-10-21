@@ -11,7 +11,9 @@
 
 #include <cuda_runtime.h>
 
+#include "px4rl/airframes.h"
 #include "px4rl/c_api.h"
+#include "px4rl/plant.h"
 
 namespace {
 
@@ -136,6 +138,29 @@ int positionStep(px4rl_cuda_fleet *f, PositionInputs &in, uint64_t time_us, void
 					optional_outputs ? in.outcome.get() : nullptr, stream);
 }
 
+// Rotor step inputs at the Iris hover command (rounded PWM), body at rest.
+struct RotorInputs {
+	int n;
+	DeviceArray<float> actuator, velocity, rates, force, torque, rotor_force;
+	DeviceArray<uint8_t> armed;
+
+	explicit RotorInputs(int count)
+		: n(count), actuator(4 * count), velocity(3 * count), rates(3 * count), force(3 * count), torque(3 * count),
+		  rotor_force(12 * count), armed(count)
+	{
+		actuator.upload(std::vector<float>(4 * n, 1694.f));
+		velocity.upload(std::vector<float>(3 * n, 0.f));
+		rates.upload(std::vector<float>(3 * n, 0.f));
+		armed.upload(std::vector<uint8_t>(n, 1));
+	}
+};
+
+int rotorStep(px4rl_cuda_fleet *f, RotorInputs &in, void *stream)
+{
+	return px4rl_cuda_rotor_step(f, in.actuator.get(), in.armed.get(), in.velocity.get(), in.rates.get(), kDt,
+				     in.force.get(), in.torque.get(), in.rotor_force.get(), stream);
+}
+
 px4rl_cuda_fleet *createFleet(int n)
 {
 	px4rl_cuda_fleet *f = nullptr;
@@ -242,6 +267,130 @@ TEST(CApi, OptionalOutputsMayBeNull)
 				       nullptr, in.motors.get(), nullptr, nullptr, nullptr), 0) << px4rl_last_error();
 	CUDA_CALL(cudaDeviceSynchronize());
 	EXPECT_TRUE(allFinite(in.motors.download()));
+	EXPECT_EQ(px4rl_cuda_fleet_destroy(f), 0);
+}
+
+TEST(CApi, IrisFunctionsAreExportedByTheCudaLibrary)
+{
+	px4rl_params params;
+	px4rl_params_iris(&params);
+	EXPECT_EQ(params.num_rotors, 4);
+	EXPECT_EQ(params.rotor_ct[0], 6.5f);
+	EXPECT_EQ(params.rotor_position[0][0], 0.1515f);
+	EXPECT_EQ(params.rotor_position[1][1], -0.1875f);
+	EXPECT_EQ(params.rotor_km[2], -0.05f);
+
+	const px4rl_plant_params plant = px4rl_plant_params_iris();
+	EXPECT_EQ(plant.num_rotors, 4);
+	EXPECT_EQ(plant.rotor[0].motor_constant, 5.84e-06f);
+	EXPECT_EQ(px4rl_rigid_body_params_iris().mass, 1.5f);
+}
+
+TEST(CApi, RotorStepOfTheDefaultIrisPlantBalancesWeightAtHoverCommand)
+{
+	px4rl_cuda_fleet *f = createFleet(16);
+	ASSERT_NE(f, nullptr);
+	RotorInputs in(16);
+
+	for (int t = 0; t < 250; ++t) {
+		ASSERT_EQ(rotorStep(f, in, nullptr), 0) << px4rl_last_error();
+	}
+
+	CUDA_CALL(cudaDeviceSynchronize());
+	const std::vector<float> force = in.force.download();
+	const std::vector<float> rotor_force = in.rotor_force.download();
+	const float weight = px4rl_rigid_body_params_iris().mass * 9.80665f;
+
+	for (int i = 0; i < 16; ++i) {
+		EXPECT_NEAR(force[3 * i + 2], weight, 0.01f * weight);
+		EXPECT_NEAR(rotor_force[12 * i + 2], weight / 4.f, 0.01f * weight / 4.f);
+	}
+
+	EXPECT_EQ(px4rl_cuda_fleet_destroy(f), 0);
+}
+
+TEST(CApi, RotorStepOptionalInputsMayBeNullAndPlantResetRestsTheRotors)
+{
+	px4rl_cuda_fleet *f = createFleet(16);
+	ASSERT_NE(f, nullptr);
+	RotorInputs in(16);
+
+	for (int t = 0; t < 100; ++t) {
+		ASSERT_EQ(px4rl_cuda_rotor_step(f, in.actuator.get(), nullptr, in.velocity.get(), nullptr, kDt,
+						in.force.get(), in.torque.get(), nullptr, nullptr), 0) << px4rl_last_error();
+	}
+
+	CUDA_CALL(cudaDeviceSynchronize());
+	EXPECT_GT(in.force.download()[2], 1.f);
+
+	// A controller reset keeps the rotors spinning, a plant reset stops them.
+	px4rl_params params;
+	px4rl_params_iris(&params);
+	ASSERT_EQ(px4rl_cuda_fleet_reset(f, nullptr, &params, 1, nullptr), 0) << px4rl_last_error();
+	ASSERT_EQ(rotorStep(f, in, nullptr), 0);
+	CUDA_CALL(cudaDeviceSynchronize());
+	EXPECT_GT(in.force.download()[2], 1.f);
+
+	const px4rl_plant_params iris = px4rl_plant_params_iris();
+	ASSERT_EQ(px4rl_cuda_fleet_reset_plant(f, nullptr, &iris, 1, nullptr), 0) << px4rl_last_error();
+	ASSERT_EQ(rotorStep(f, in, nullptr), 0);
+	CUDA_CALL(cudaDeviceSynchronize());
+	const std::vector<float> force = in.force.download();
+
+	for (int i = 0; i < 16; ++i) {
+		EXPECT_EQ(force[3 * i + 2], 0.f) << "vehicle " << i;
+	}
+
+	EXPECT_EQ(px4rl_cuda_fleet_destroy(f), 0);
+}
+
+TEST(CApi, RotorStepAndPlantResetErrorPaths)
+{
+	RotorInputs in(8);
+	const px4rl_plant_params iris = px4rl_plant_params_iris();
+
+	EXPECT_NE(rotorStep(nullptr, in, nullptr), 0);
+	EXPECT_STRNE(px4rl_last_error(), "");
+	EXPECT_NE(px4rl_cuda_fleet_reset_plant(nullptr, nullptr, &iris, 1, nullptr), 0);
+
+	px4rl_cuda_fleet *f = createFleet(8);
+	ASSERT_NE(f, nullptr);
+
+	// Required buffers and dt.
+	EXPECT_NE(px4rl_cuda_rotor_step(f, nullptr, nullptr, in.velocity.get(), nullptr, kDt, in.force.get(),
+					in.torque.get(), nullptr, nullptr), 0);
+	EXPECT_NE(px4rl_cuda_rotor_step(f, in.actuator.get(), nullptr, nullptr, nullptr, kDt, in.force.get(),
+					in.torque.get(), nullptr, nullptr), 0);
+	EXPECT_NE(px4rl_cuda_rotor_step(f, in.actuator.get(), nullptr, in.velocity.get(), nullptr, kDt, nullptr,
+					in.torque.get(), nullptr, nullptr), 0);
+	EXPECT_NE(px4rl_cuda_rotor_step(f, in.actuator.get(), nullptr, in.velocity.get(), nullptr, kDt, in.force.get(),
+					nullptr, nullptr, nullptr), 0);
+
+	for (float bad_dt : {0.f, -kDt, static_cast<float>(NAN), static_cast<float>(INFINITY)}) {
+		EXPECT_NE(px4rl_cuda_rotor_step(f, in.actuator.get(), nullptr, in.velocity.get(), nullptr, bad_dt,
+						in.force.get(), in.torque.get(), nullptr, nullptr), 0) << bad_dt;
+	}
+
+	// n_plant must be 1 or n; the plant must be simulatable.
+	px4rl_plant_params two[2] = {iris, iris};
+	EXPECT_NE(px4rl_cuda_fleet_reset_plant(f, nullptr, two, 2, nullptr), 0);
+	EXPECT_NE(px4rl_cuda_fleet_reset_plant(f, nullptr, two, 0, nullptr), 0);
+	EXPECT_NE(px4rl_cuda_fleet_reset_plant(f, nullptr, nullptr, 1, nullptr), 0);
+	px4rl_plant_params bad = iris;
+	bad.num_rotors = 0;
+	EXPECT_NE(px4rl_cuda_fleet_reset_plant(f, nullptr, &bad, 1, nullptr), 0);
+	bad = iris;
+	bad.rotor[0].px4_output_index = 4;
+	EXPECT_NE(px4rl_cuda_fleet_reset_plant(f, nullptr, &bad, 1, nullptr), 0);
+	bad = iris;
+	bad.rotor[3].time_constant_up = 0.f;
+	EXPECT_NE(px4rl_cuda_fleet_reset_plant(f, nullptr, &bad, 1, nullptr), 0);
+
+	// The fleet is still usable after rejected calls.
+	EXPECT_EQ(px4rl_cuda_fleet_reset_plant(f, nullptr, &iris, 1, nullptr), 0) << px4rl_last_error();
+	EXPECT_EQ(rotorStep(f, in, nullptr), 0) << px4rl_last_error();
+	CUDA_CALL(cudaDeviceSynchronize());
+	EXPECT_TRUE(allFinite(in.force.download()));
 	EXPECT_EQ(px4rl_cuda_fleet_destroy(f), 0);
 }
 
@@ -389,6 +538,7 @@ TEST(CApi, StepCallsAreGraphCapturable)
 	ASSERT_NE(f, nullptr);
 	Inputs in(n);
 	PositionInputs position_in(n);
+	RotorInputs rotor_in(n);
 
 	cudaStream_t stream = nullptr;
 	CUDA_CALL(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
@@ -397,6 +547,7 @@ TEST(CApi, StepCallsAreGraphCapturable)
 	ASSERT_EQ(positionStep(f, position_in, 1000000u, stream), 0);
 	ASSERT_EQ(attitudeStep(f, in, stream), 0);
 	ASSERT_EQ(rateStep(f, in, stream), 0);
+	ASSERT_EQ(rotorStep(f, rotor_in, stream), 0);
 	CUDA_CALL(cudaStreamSynchronize(stream));
 
 	// Any allocation or synchronisation inside a step call would invalidate the capture.
@@ -404,6 +555,7 @@ TEST(CApi, StepCallsAreGraphCapturable)
 	EXPECT_EQ(positionStep(f, position_in, 1020000u, stream), 0) << px4rl_last_error();
 	EXPECT_EQ(attitudeStep(f, in, stream), 0) << px4rl_last_error();
 	EXPECT_EQ(rateStep(f, in, stream), 0) << px4rl_last_error();
+	EXPECT_EQ(rotorStep(f, rotor_in, stream), 0) << px4rl_last_error();
 	cudaGraph_t graph = nullptr;
 	CUDA_CALL(cudaStreamEndCapture(stream, &graph));
 
@@ -417,6 +569,8 @@ TEST(CApi, StepCallsAreGraphCapturable)
 	CUDA_CALL(cudaStreamSynchronize(stream));
 	EXPECT_TRUE(allFinite(in.motors.download()));
 	EXPECT_TRUE(allFinite(position_in.q_sp.download()));
+	EXPECT_TRUE(allFinite(rotor_in.force.download()));
+	EXPECT_TRUE(allFinite(rotor_in.torque.download()));
 
 	CUDA_CALL(cudaGraphExecDestroy(exec));
 	CUDA_CALL(cudaGraphDestroy(graph));

@@ -1,8 +1,10 @@
 #include "px4rl/cpu_fleet.hpp"
 
+#include <cmath>
 #include <stdexcept>
 #include <string>
 
+#include "px4rl/airframes.h"
 #include "px4rl/step_io.hpp"
 
 namespace px4rl {
@@ -23,6 +25,13 @@ CpuFleet::CpuFleet(int n)
 
 	for (Vehicle &vehicle : vehicles_) {
 		vehicle.configure(defaults);
+	}
+
+	const px4rl_plant_params iris = px4rl_plant_params_iris();
+	plants_.resize(static_cast<size_t>(n));
+
+	for (VehiclePlant &plant : plants_) {
+		plant.configure(iris);
 	}
 }
 
@@ -47,6 +56,30 @@ void CpuFleet::reset(const uint8_t *mask, const px4rl_params *params, int n_para
 		if (mask == nullptr || mask[i] != 0) {
 			vehicles_[i] = Vehicle();
 			vehicles_[i].configure(params[stride * i]);
+		}
+	}
+}
+
+void CpuFleet::resetPlant(const uint8_t *mask, const px4rl_plant_params *plants, int n_plants)
+{
+	const int n = size();
+
+	if (plants == nullptr || (n_plants != 1 && n_plants != n)) {
+		throw std::invalid_argument("CpuFleet::resetPlant: n_plants must be 1 or n");
+	}
+
+	for (int i = 0; i < n_plants; ++i) {
+		if (const char *error = validatePlantParams(plants[i])) {
+			throw std::invalid_argument(std::string("CpuFleet::resetPlant: ") + error);
+		}
+	}
+
+	const int stride = n_plants == 1 ? 0 : 1;
+
+#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles)
+	for (int i = 0; i < n; ++i) {
+		if (mask == nullptr || mask[i] != 0) {
+			plants_[i].configure(plants[stride * i]);
 		}
 	}
 }
@@ -90,6 +123,24 @@ void CpuFleet::rateStep(const float *rates_sp, const float *thrust_body, const f
 #pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles)
 	for (int i = 0; i < n; ++i) {
 		rateStepAt(vehicles_[i], i, buffers);
+	}
+}
+
+void CpuFleet::rotorStep(const float *actuator, const uint8_t *armed, const float *body_velocity_flu,
+			 const float *body_rates_flu, float dt, float *force_flu_out, float *torque_flu_out,
+			 float *rotor_force_flu_out)
+{
+	if (!(dt > 0.f) || !std::isfinite(dt)) {
+		throw std::invalid_argument("CpuFleet::rotorStep: dt must be positive and finite");
+	}
+
+	const RotorStepBuffers buffers{actuator,      armed,          body_velocity_flu, body_rates_flu,
+				       dt,            force_flu_out,  torque_flu_out,    rotor_force_flu_out};
+	const int n = size();
+
+#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles)
+	for (int i = 0; i < n; ++i) {
+		rotorStepAt(plants_[i], i, buffers);
 	}
 }
 

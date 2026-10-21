@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 #include <vector>
@@ -13,8 +14,10 @@
 #include <ControlAllocatorWrapper.hpp>
 #include <RateControllerWrapper.hpp>
 
+#include "px4rl/airframes.h"
 #include "px4rl/c_api.h"
 #include "px4rl/cpu_fleet.hpp"
+#include "px4rl/gazebo_motor_model.hpp"
 #include "px4rl/hover_thrust_module.hpp"
 #include "px4rl/position_module.hpp"
 
@@ -49,6 +52,8 @@ Variant makeVariant(int kind)
 {
 	Variant v;
 	px4rl_params_default(&v.flat);
+	// px4rl's default follows PX4 (MC_AIRMODE 0); the px4_stack wrapper struct defaults to 1.
+	v.allocator.airmode = 0;
 
 	if (kind == 1) {
 		v.attitude.roll_p = 5.f;
@@ -335,6 +340,7 @@ struct PositionReferenceVehicle {
 	void configure(const px4rl_params &flat)
 	{
 		Variant variant; // px4_stack structs at their defaults, which is what `flat` holds for them
+		variant.allocator.airmode = flat.airmode; // px4rl follows PX4's MC_AIRMODE default (0)
 		variant.flat = flat;
 		chain.configure(variant);
 		position.configure(flat, flat.position_dt);
@@ -445,7 +451,7 @@ TEST(FleetCpu, DefaultParamsMatchStructDefaults)
 	px4rl_params p;
 	px4rl_params_default(&p);
 	EXPECT_EQ(p.num_rotors, 4);
-	EXPECT_EQ(p.airmode, 1);
+	EXPECT_EQ(p.airmode, 0); // PX4 MC_AIRMODE default, not the px4_stack wrapper default
 	EXPECT_EQ(p.normalize_rpy, 1);
 	EXPECT_EQ(p.output_mode, 0);
 	EXPECT_EQ(p.rotor_axis[0][2], -1.f);
@@ -833,4 +839,309 @@ TEST(FleetCpu, InvalidArgumentsThrow)
 	px4rl_params_default(&bad);
 	bad.position_dt = 0.f;
 	EXPECT_THROW(fleet.reset(nullptr, &bad, 1), std::invalid_argument);
+}
+
+namespace {
+
+struct RotorInputs {
+	std::vector<float> actuator, body_velocity, body_rates;
+	std::vector<uint8_t> armed;
+
+	explicit RotorInputs(int n) : actuator(4 * n), body_velocity(3 * n), body_rates(3 * n), armed(n) {}
+
+	void draw(Rng &rng)
+	{
+		for (size_t i = 0; i < armed.size(); ++i) {
+			armed[i] = (i % 5 != 0) ? 1 : 0;
+		}
+
+		for (float &v : actuator) {
+			v = std::floor(rng.range(1000.f, 2000.f));
+		}
+
+		for (float &v : body_velocity) {
+			v = rng.range(-5.f, 5.f);
+		}
+
+		for (float &v : body_rates) {
+			v = rng.range(-3.f, 3.f);
+		}
+	}
+};
+
+struct RotorOutputs {
+	std::vector<float> force, torque, rotor_force;
+
+	explicit RotorOutputs(int n) : force(3 * n), torque(3 * n), rotor_force(12 * n) {}
+};
+
+bool bitwiseEqual(const std::vector<float> &a, const std::vector<float> &b)
+{
+	return a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+}
+
+} // namespace
+
+// The fleet's rotor step is the composition pwmToActuatorInput -> plantStep of gazebo_motor_model.hpp, with
+// the Iris plant in a new fleet.
+TEST(FleetCpu, RotorStepMatchesPlantStepOfTheIrisPlant)
+{
+	px4rl::CpuFleet fleet(kVehicles);
+	const px4rl_plant_params iris = px4rl_plant_params_iris();
+	std::vector<px4rl::RotorState> states(4 * kVehicles);
+
+	RotorInputs in(kVehicles);
+	RotorOutputs out(kVehicles);
+	Rng rng{4242u};
+
+	for (int t = 0; t < kSteps; ++t) {
+		in.draw(rng);
+		fleet.rotorStep(in.actuator.data(), in.armed.data(), in.body_velocity.data(), in.body_rates.data(), kDt,
+				out.force.data(), out.torque.data(), out.rotor_force.data());
+
+		for (int i = 0; i < kVehicles; ++i) {
+			float u[4];
+
+			for (int k = 0; k < 4; ++k) {
+				u[k] = px4rl::pwmToActuatorInput(in.actuator[4 * i + k]);
+			}
+
+			px4rl::RotorOutput per_rotor[4];
+			const px4rl::Wrench w = px4rl::plantStep(
+							iris, &states[4 * i], u, in.armed[i] != 0,
+							matrix::Vector3f(&in.body_velocity[3 * i]), matrix::Vector3f(&in.body_rates[3 * i]), kDt,
+							per_rotor);
+
+			for (int a = 0; a < 3; ++a) {
+				ASSERT_EQ(out.force[3 * i + a], w.force(a)) << "vehicle " << i << " step " << t;
+				ASSERT_EQ(out.torque[3 * i + a], w.torque(a)) << "vehicle " << i << " step " << t;
+
+				for (int k = 0; k < 4; ++k) {
+					ASSERT_EQ(out.rotor_force[12 * i + 3 * k + a], per_rotor[k].force(a));
+				}
+			}
+		}
+	}
+}
+
+TEST(FleetCpu, RotorStepOptionalInputsMeanAllArmedAndNoRates)
+{
+	RotorInputs in(kVehicles);
+	Rng rng{99u};
+	in.draw(rng);
+	std::fill(in.armed.begin(), in.armed.end(), 1);
+	std::fill(in.body_rates.begin(), in.body_rates.end(), 0.f);
+
+	px4rl::CpuFleet explicit_fleet(kVehicles), default_fleet(kVehicles);
+	RotorOutputs a(kVehicles), b(kVehicles);
+
+	for (int t = 0; t < 5; ++t) {
+		explicit_fleet.rotorStep(in.actuator.data(), in.armed.data(), in.body_velocity.data(), in.body_rates.data(),
+					 kDt, a.force.data(), a.torque.data(), nullptr);
+		default_fleet.rotorStep(in.actuator.data(), nullptr, in.body_velocity.data(), nullptr, kDt, b.force.data(),
+					b.torque.data(), nullptr);
+	}
+
+	EXPECT_TRUE(bitwiseEqual(a.force, b.force));
+	EXPECT_TRUE(bitwiseEqual(a.torque, b.torque));
+	EXPECT_GT(std::fabs(a.force[2]), 0.f);
+}
+
+// A disarmed vehicle commands zero_position_disarmed (0 rad/s for Iris), so its rotors spin down.
+TEST(FleetCpu, DisarmedVehicleSpinsDown)
+{
+	px4rl::CpuFleet fleet(2);
+	const float pwm[8] = {1700.f, 1700.f, 1700.f, 1700.f, 1700.f, 1700.f, 1700.f, 1700.f};
+	const float velocity[6] = {};
+	const uint8_t armed_first[2] = {1, 1};
+	const uint8_t armed_second[2] = {1, 0};
+	float force[6], torque[6];
+
+	for (int t = 0; t < 250; ++t) {
+		fleet.rotorStep(pwm, armed_first, velocity, nullptr, kDt, force, torque, nullptr);
+	}
+
+	const float spun_up = force[2];
+	ASSERT_GT(spun_up, 5.f);
+
+	for (int t = 0; t < 500; ++t) {
+		fleet.rotorStep(pwm, armed_second, velocity, nullptr, kDt, force, torque, nullptr);
+	}
+
+	EXPECT_NEAR(force[2], spun_up, 1e-3f * spun_up);
+	EXPECT_LT(force[5], 1e-3f * spun_up);
+}
+
+TEST(FleetCpu, ControllerResetKeepsRotorStateAndPlantResetReturnsToRest)
+{
+	constexpr int n = 8;
+	px4rl::CpuFleet fleet(n), reference(n);
+	RotorInputs in(n);
+	Rng rng{7u};
+	in.draw(rng);
+	std::fill(in.armed.begin(), in.armed.end(), 1);
+	RotorOutputs out(n), ref_out(n);
+
+	for (int t = 0; t < 100; ++t) {
+		fleet.rotorStep(in.actuator.data(), nullptr, in.body_velocity.data(), nullptr, kDt, out.force.data(),
+				out.torque.data(), nullptr);
+		reference.rotorStep(in.actuator.data(), nullptr, in.body_velocity.data(), nullptr, kDt, ref_out.force.data(),
+				    ref_out.torque.data(), nullptr);
+	}
+
+	px4rl_params params;
+	px4rl_params_iris(&params);
+	fleet.reset(nullptr, &params, 1);
+	fleet.rotorStep(in.actuator.data(), nullptr, in.body_velocity.data(), nullptr, kDt, out.force.data(),
+			out.torque.data(), nullptr);
+	reference.rotorStep(in.actuator.data(), nullptr, in.body_velocity.data(), nullptr, kDt, ref_out.force.data(),
+			    ref_out.torque.data(), nullptr);
+	EXPECT_TRUE(bitwiseEqual(out.force, ref_out.force)) << "a controller reset changed the rotors";
+	EXPECT_TRUE(bitwiseEqual(out.torque, ref_out.torque));
+
+	uint8_t mask[n] = {1, 0, 1, 0, 0, 0, 0, 0};
+	const px4rl_plant_params iris = px4rl_plant_params_iris();
+	fleet.resetPlant(mask, &iris, 1);
+	fleet.rotorStep(in.actuator.data(), nullptr, in.body_velocity.data(), nullptr, kDt, out.force.data(),
+			out.torque.data(), nullptr);
+	reference.rotorStep(in.actuator.data(), nullptr, in.body_velocity.data(), nullptr, kDt, ref_out.force.data(),
+			    ref_out.torque.data(), nullptr);
+
+	for (int i = 0; i < n; ++i) {
+		for (int a = 0; a < 3; ++a) {
+			if (mask[i]) {
+				EXPECT_EQ(out.force[3 * i + a], 0.f) << "rotors of vehicle " << i << " should be at rest";
+				EXPECT_EQ(out.torque[3 * i + a], 0.f);
+
+			} else {
+				EXPECT_EQ(out.force[3 * i + a], ref_out.force[3 * i + a]);
+			}
+		}
+	}
+}
+
+TEST(FleetCpu, PlantRotorReadsItsPx4Output)
+{
+	px4rl::CpuFleet fleet(1);
+	px4rl_plant_params plant = px4rl_plant_params_iris();
+	plant.rotor[0].px4_output_index = 3;
+	plant.rotor[3].px4_output_index = 0;
+	fleet.resetPlant(nullptr, &plant, 1);
+
+	const float pwm[4] = {1000.f, 1000.f, 1000.f, 1900.f};
+	const float velocity[3] = {};
+	float force[3], torque[3], rotor_force[12];
+
+	for (int t = 0; t < 250; ++t) {
+		fleet.rotorStep(pwm, nullptr, velocity, nullptr, kDt, force, torque, rotor_force);
+	}
+
+	// Output 3 (u = 0.9, rotor speed 1000 rad/s) drives plant rotor 0, the other rotors are at idle speed (u = 0).
+	EXPECT_GT(rotor_force[2], 4.f * rotor_force[5]);
+	EXPECT_NEAR(rotor_force[5], rotor_force[8], 1e-6f);
+	EXPECT_NEAR(rotor_force[2], px4rl_plant_params_iris().rotor[0].motor_constant * 1000.f * 1000.f, 1e-3f);
+}
+
+TEST(FleetCpu, InvalidPlantArgumentsThrow)
+{
+	px4rl::CpuFleet fleet(8);
+	px4rl_plant_params two[2] = {px4rl_plant_params_iris(), px4rl_plant_params_iris()};
+	EXPECT_THROW(fleet.resetPlant(nullptr, two, 2), std::invalid_argument);
+	EXPECT_THROW(fleet.resetPlant(nullptr, nullptr, 1), std::invalid_argument);
+
+	px4rl_plant_params bad = px4rl_plant_params_iris();
+	bad.num_rotors = 0;
+	EXPECT_THROW(fleet.resetPlant(nullptr, &bad, 1), std::invalid_argument);
+	bad = px4rl_plant_params_iris();
+	bad.num_rotors = PX4RL_MAX_ROTORS + 1;
+	EXPECT_THROW(fleet.resetPlant(nullptr, &bad, 1), std::invalid_argument);
+	bad = px4rl_plant_params_iris();
+	bad.rotor[2].px4_output_index = PX4RL_MAX_ROTORS;
+	EXPECT_THROW(fleet.resetPlant(nullptr, &bad, 1), std::invalid_argument);
+	bad = px4rl_plant_params_iris();
+	bad.rotor[1].time_constant_down = 0.f;
+	EXPECT_THROW(fleet.resetPlant(nullptr, &bad, 1), std::invalid_argument);
+
+	const float pwm[32] = {};
+	const float velocity[24] = {};
+	float force[24], torque[24];
+	EXPECT_THROW(fleet.rotorStep(pwm, nullptr, velocity, nullptr, 0.f, force, torque, nullptr), std::invalid_argument);
+	EXPECT_THROW(fleet.rotorStep(pwm, nullptr, velocity, nullptr, -kDt, force, torque, nullptr), std::invalid_argument);
+	EXPECT_THROW(fleet.rotorStep(pwm, nullptr, velocity, nullptr, NAN, force, torque, nullptr), std::invalid_argument);
+}
+
+TEST(FleetCpu, IrisParamsDifferFromDefaultsOnlyInRotorThrustCoefficient)
+{
+	px4rl_params defaults, iris;
+	px4rl_params_default(&defaults);
+	px4rl_params_iris(&iris);
+
+	for (int i = 0; i < 4; ++i) {
+		EXPECT_EQ(iris.rotor_ct[i], 6.5f);
+		EXPECT_EQ(defaults.rotor_ct[i], 1.f);
+		iris.rotor_ct[i] = defaults.rotor_ct[i];
+	}
+
+	// Every other field, including the CA_ROTOR positions, axes and KM, equals createQuadXIris() and the defaults.
+	EXPECT_EQ(std::memcmp(&iris, &defaults, sizeof(iris)), 0);
+}
+
+// The allocator normalises its mix matrix, so a common CT (1.0 in createQuadXIris(), 6.5 in the airframe)
+// does not change the motor commands of the first step. Later steps are only reported: the two fleets then hold
+// states that differ by rounding, and the allocator's saturation flags, which feed the rate controller's
+// anti-windup, can flip on such differences.
+TEST(FleetCpu, UniformThrustCoefficientDoesNotChangeMotorCommands)
+{
+	px4rl_params defaults, iris;
+	px4rl_params_default(&defaults);
+	px4rl_params_iris(&iris);
+	px4rl::CpuFleet a(kVehicles), b(kVehicles);
+	a.reset(nullptr, &defaults, 1);
+	b.reset(nullptr, &iris, 1);
+
+	std::vector<float> q(4 * kVehicles), q_sp(4 * kVehicles), thrust(3 * kVehicles), rates(3 * kVehicles),
+		accel(3 * kVehicles, 0.f), rates_sp(3 * kVehicles), thrust_body(3 * kVehicles), motors_a(4 * kVehicles),
+		motors_b(4 * kVehicles);
+	Rng rng{31337u};
+	double first_step_difference = 0.0, max_difference = 0.0;
+
+	for (int t = 0; t < kSteps; ++t) {
+		for (int i = 0; i < kVehicles; ++i) {
+			const matrix::Quatf att(matrix::Eulerf(rng.range(-0.6f, 0.6f), rng.range(-0.6f, 0.6f), rng.range(-3.f, 3.f)));
+			const matrix::Quatf sp(matrix::Eulerf(rng.range(-0.8f, 0.8f), rng.range(-0.8f, 0.8f), rng.range(-3.f, 3.f)));
+
+			for (int k = 0; k < 4; ++k) {
+				q[4 * i + k] = att(k);
+				q_sp[4 * i + k] = sp(k);
+			}
+
+			thrust[3 * i + 0] = thrust[3 * i + 1] = 0.f;
+			thrust[3 * i + 2] = -rng.range(0.3f, 0.8f);
+
+			for (int k = 0; k < 3; ++k) {
+				rates[3 * i + k] = rng.range(-2.f, 2.f);
+			}
+		}
+
+		a.attitudeStep(q.data(), q_sp.data(), nullptr, thrust.data(), rates_sp.data(), thrust_body.data());
+		a.rateStep(rates_sp.data(), thrust_body.data(), rates.data(), accel.data(), kDt, nullptr, motors_a.data(),
+			   nullptr, nullptr);
+		b.attitudeStep(q.data(), q_sp.data(), nullptr, thrust.data(), rates_sp.data(), thrust_body.data());
+		b.rateStep(rates_sp.data(), thrust_body.data(), rates.data(), accel.data(), kDt, nullptr, motors_b.data(),
+			   nullptr, nullptr);
+
+		for (size_t k = 0; k < motors_a.size(); ++k) {
+			const double difference = std::fabs(motors_a[k] - motors_b[k]);
+			max_difference = std::max(max_difference, difference);
+
+			if (t == 0) {
+				first_step_difference = std::max(first_step_difference, difference);
+			}
+		}
+	}
+
+	std::printf("iris vs default geometry (CT 6.5 vs 1.0), %d vehicles: max |motor difference| = %.3e at step 0, %.3e over "
+		    "%d steps\n",
+		    kVehicles, first_step_difference, max_difference, kSteps);
+	EXPECT_LE(first_step_difference, 1e-5);
 }

@@ -9,17 +9,20 @@
 #error "PX4RL_HD must be defined as __host__ __device__ for this target"
 #endif
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <new>
 
 #include <cuda_runtime.h>
 
+#include "px4rl/airframes.h"
 #include "px4rl/c_api.h"
 #include "px4rl/params.hpp"
 #include "px4rl/step_io.hpp"
 #include "px4rl/hover_thrust_module.hpp"
 #include "px4rl/position_module.hpp"
+#include "px4rl/vehicle_plant.hpp"
 
 #include "AttitudeControl.cpp"
 #include "AttitudeControllerWrapper.cpp"
@@ -36,11 +39,16 @@
 #include "zero_order_hover_thrust_ekf.cpp"
 #include "hysteresis/hysteresis.cpp"
 
+// px4rl_params_iris, px4rl_plant_params_iris and px4rl_rigid_body_params_iris, exported from this library.
+#include "../airframes/iris.cpp"
+
 struct px4rl_cuda_fleet {
 	int n{0};
 	int device{0};
 	px4rl::Vehicle *vehicles{nullptr};
 	px4rl_params *params{nullptr}; // n entries, written by create/reset
+	px4rl::VehiclePlant *plants{nullptr};
+	px4rl_plant_params *plant_params{nullptr}; // n entries, written by create/reset_plant
 };
 
 namespace {
@@ -118,6 +126,20 @@ __global__ void initKernel(px4rl::Vehicle *vehicles, int n, const uint8_t *mask,
 	vehicles[i].configure(params[params_stride * i]);
 }
 
+// Same as initKernel for the plants: constructs the selected ones from plant_params, rotors at rest.
+__global__ void initPlantKernel(px4rl::VehiclePlant *plants, int n, const uint8_t *mask,
+				const px4rl_plant_params *plant_params, int params_stride)
+{
+	const int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if (i >= n || (mask != nullptr && mask[i] == 0)) {
+		return;
+	}
+
+	new (&plants[i]) px4rl::VehiclePlant();
+	plants[i].configure(plant_params[params_stride * i]);
+}
+
 __global__ void positionKernel(px4rl::Vehicle *vehicles, int n, px4rl::PositionStepBuffers buffers)
 {
 	const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -142,6 +164,15 @@ __global__ void rateKernel(px4rl::Vehicle *vehicles, int n, px4rl::RateStepBuffe
 
 	if (i < n) {
 		px4rl::rateStepAt(vehicles[i], i, buffers);
+	}
+}
+
+__global__ void rotorKernel(px4rl::VehiclePlant *plants, int n, px4rl::RotorStepBuffers buffers)
+{
+	const int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if (i < n) {
+		px4rl::rotorStepAt(plants[i], i, buffers);
 	}
 }
 
@@ -199,6 +230,8 @@ int px4rl_cuda_fleet_create(int n, int device, px4rl_cuda_fleet **out)
 	const auto release = [&](int status) {
 		cudaFree(fleet->vehicles);
 		cudaFree(fleet->params);
+		cudaFree(fleet->plants);
+		cudaFree(fleet->plant_params);
 		delete fleet;
 		return status;
 	};
@@ -211,6 +244,14 @@ int px4rl_cuda_fleet_create(int n, int device, px4rl_cuda_fleet **out)
 		return release(failCuda("cudaMalloc(params)", e));
 	}
 
+	if (cudaError_t e = cudaMalloc(&fleet->plants, sizeof(px4rl::VehiclePlant) * n); e != cudaSuccess) {
+		return release(failCuda("cudaMalloc(plants)", e));
+	}
+
+	if (cudaError_t e = cudaMalloc(&fleet->plant_params, sizeof(px4rl_plant_params) * n); e != cudaSuccess) {
+		return release(failCuda("cudaMalloc(plant params)", e));
+	}
+
 	const px4rl_params defaults = px4rl::defaultParams();
 
 	if (cudaError_t e = cudaMemcpy(fleet->params, &defaults, sizeof(defaults), cudaMemcpyHostToDevice);
@@ -218,7 +259,15 @@ int px4rl_cuda_fleet_create(int n, int device, px4rl_cuda_fleet **out)
 		return release(failCuda("cudaMemcpy(default params)", e));
 	}
 
+	const px4rl_plant_params iris_plant = px4rl_plant_params_iris();
+
+	if (cudaError_t e = cudaMemcpy(fleet->plant_params, &iris_plant, sizeof(iris_plant), cudaMemcpyHostToDevice);
+	    e != cudaSuccess) {
+		return release(failCuda("cudaMemcpy(iris plant)", e));
+	}
+
 	initKernel<<<blocksFor(n), kThreadsPerBlock>>>(fleet->vehicles, n, nullptr, fleet->params, 0, false);
+	initPlantKernel<<<blocksFor(n), kThreadsPerBlock>>>(fleet->plants, n, nullptr, fleet->plant_params, 0);
 
 	if (cudaError_t e = cudaGetLastError(); e != cudaSuccess) {
 		return release(failCuda("initKernel launch", e));
@@ -248,9 +297,14 @@ int px4rl_cuda_fleet_destroy(px4rl_cuda_fleet *f)
 		} else {
 			cudaError_t e1 = cudaFree(f->vehicles);
 			cudaError_t e2 = cudaFree(f->params);
+			cudaError_t e3 = cudaFree(f->plants);
+			cudaError_t e4 = cudaFree(f->plant_params);
 
-			if (e1 != cudaSuccess || e2 != cudaSuccess) {
-				status = failCuda("cudaFree", e1 != cudaSuccess ? e1 : e2);
+			for (cudaError_t e : {e1, e2, e3, e4}) {
+				if (e != cudaSuccess) {
+					status = failCuda("cudaFree", e);
+					break;
+				}
 			}
 		}
 	}
@@ -305,6 +359,48 @@ int px4rl_cuda_fleet_reset(px4rl_cuda_fleet *f, const uint8_t *mask, const px4rl
 
 	if (cudaError_t e = cudaGetLastError(); e != cudaSuccess) {
 		return failCuda("initKernel launch", e);
+	}
+
+	return 0;
+}
+
+int px4rl_cuda_fleet_reset_plant(px4rl_cuda_fleet *f, const uint8_t *mask, const px4rl_plant_params *plant_host,
+				 int n_plant, void *stream)
+{
+	if (f == nullptr) {
+		return failInvalid("px4rl_cuda_fleet_reset_plant: fleet is null");
+	}
+
+	if (plant_host == nullptr || (n_plant != 1 && n_plant != f->n)) {
+		return failInvalid("px4rl_cuda_fleet_reset_plant: n_plant must be 1 or the fleet size");
+	}
+
+	for (int i = 0; i < n_plant; ++i) {
+		if (const char *error = px4rl::validatePlantParams(plant_host[i])) {
+			return failInvalid(error);
+		}
+	}
+
+	DeviceScope scope(f->device);
+
+	if (scope.error() != cudaSuccess) {
+		return failCuda("cudaSetDevice", scope.error());
+	}
+
+	const auto cuda_stream = static_cast<cudaStream_t>(stream);
+
+	// Pageable host memory is staged before the call returns; the copy is ordered with the init kernel.
+	if (cudaError_t e = cudaMemcpyAsync(f->plant_params, plant_host, sizeof(px4rl_plant_params) * n_plant,
+					    cudaMemcpyHostToDevice, cuda_stream);
+	    e != cudaSuccess) {
+		return failCuda("cudaMemcpyAsync(plant params)", e);
+	}
+
+	initPlantKernel<<<blocksFor(f->n), kThreadsPerBlock, 0, cuda_stream>>>(f->plants, f->n, mask, f->plant_params,
+									       n_plant == 1 ? 0 : 1);
+
+	if (cudaError_t e = cudaGetLastError(); e != cudaSuccess) {
+		return failCuda("initPlantKernel launch", e);
 	}
 
 	return 0;
@@ -397,6 +493,41 @@ int px4rl_cuda_rate_step(px4rl_cuda_fleet *f, const float *rates_sp, const float
 
 	if (cudaError_t e = cudaGetLastError(); e != cudaSuccess) {
 		return failCuda("rateKernel launch", e);
+	}
+
+	return 0;
+}
+
+int px4rl_cuda_rotor_step(px4rl_cuda_fleet *f, const float *actuator, const uint8_t *armed,
+			  const float *body_velocity_flu, const float *body_rates_flu, float dt, float *force_flu_out,
+			  float *torque_flu_out, float *rotor_force_flu_out, void *stream)
+{
+	if (f == nullptr) {
+		return failInvalid("px4rl_cuda_rotor_step: fleet is null");
+	}
+
+	if (actuator == nullptr || body_velocity_flu == nullptr || force_flu_out == nullptr ||
+	    torque_flu_out == nullptr) {
+		return failInvalid("px4rl_cuda_rotor_step: required buffer is null");
+	}
+
+	if (!(dt > 0.f) || !std::isfinite(dt)) {
+		return failInvalid("px4rl_cuda_rotor_step: dt must be positive and finite");
+	}
+
+	DeviceScope scope(f->device);
+
+	if (scope.error() != cudaSuccess) {
+		return failCuda("cudaSetDevice", scope.error());
+	}
+
+	const px4rl::RotorStepBuffers buffers{actuator,      armed,         body_velocity_flu, body_rates_flu,
+					      dt,            force_flu_out, torque_flu_out,    rotor_force_flu_out};
+	rotorKernel<<<blocksFor(f->n), kThreadsPerBlock, 0, static_cast<cudaStream_t>(stream)>>>(f->plants, f->n,
+												 buffers);
+
+	if (cudaError_t e = cudaGetLastError(); e != cudaSuccess) {
+		return failCuda("rotorKernel launch", e);
 	}
 
 	return 0;

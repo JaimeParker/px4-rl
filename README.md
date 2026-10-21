@@ -25,7 +25,8 @@ as PX4 SITL: quantized PWM, then rotor-speed lag, then thrust and drag.
 | Attitude, rate, allocator, actuator output | ✓ | ✓ (batched fleet, C API) |
 | Position/velocity control, hover-thrust estimator | ✓ | ✓ (batched fleet, C API) |
 | Gazebo-faithful rotor model, ENU/FLU ↔ NED/FRD frames | ✓ | ✓ |
-| Iris airframe (PX4 SITL parameters) | ✓ | ✓ |
+| Rotor plant in the fleet (`rotor_step`: PWM → wrench) | ✓ | ✓ (batched fleet, C API) |
+| Iris airframe (PX4 SITL parameters, controller and plant) | ✓ | ✓ |
 | Python bindings (ctypes GPU, pybind11 CPU) | planned | planned |
 
 ## Build
@@ -65,8 +66,8 @@ target_link_libraries(app PRIVATE px4rl::px4)   # controllers; px4rl::fleet for 
 ```c
 px4rl_cuda_fleet* fleet;
 px4rl_params params;
-px4rl_params_default(&params);
-px4rl_cuda_fleet_create(n, /*device*/ 0, &fleet);
+px4rl_params_iris(&params);   /* or px4rl_params_default(&params) */
+px4rl_cuda_fleet_create(n, /*device*/ 0, &fleet);   /* every vehicle also gets the Iris rotor plant */
 px4rl_cuda_fleet_reset(fleet, /*mask*/ NULL, &params, 1, stream);
 /* velocity + yaw: traj_sp rows are (pos[3], vel[3], acc[3], yaw, yawspeed) with NaN for unused fields */
 px4rl_cuda_position_step(fleet, pos, vel, heading, az, traj_sp, NULL, dt_pos, time_us,
@@ -74,12 +75,15 @@ px4rl_cuda_position_step(fleet, pos, vel, heading, az, traj_sp, NULL, dt_pos, ti
 px4rl_cuda_attitude_step(fleet, q, /*q_sp: use position_step's*/ NULL, NULL, thrust_sp_body,
                          rates_sp, thrust_body, stream);
 px4rl_cuda_rate_step(fleet, rates_sp, thrust_body, rates, angular_accel, dt, NULL, motors, pwm, NULL, stream);
+/* rotor plant: PWM and body velocity in (body FLU, relative to the air), wrench on the body out */
+px4rl_cuda_rotor_step(fleet, pwm, NULL, body_vel_flu, body_rates_flu, dt, force_flu, torque_flu, NULL, stream);
 ```
 
 How the API behaves:
 - Step calls only launch kernels on the given stream. They never allocate or synchronize, so they can be captured in CUDA graphs.
 - The shared library exports only `px4rl_*` C symbols. It does not depend on the Python or PyTorch version; a PyTorch user passes `tensor.data_ptr()` and `torch.cuda.current_stream().cuda_stream`.
 - All PX4-side quantities use PX4's frames: NED world, FRD body, Hamilton quaternions (w, x, y, z). `include/px4rl/frames.hpp` converts to and from ENU/FLU.
+- The rotor plant works in the Gazebo / Isaac Lab frames: the wrench returned by `px4rl_cuda_rotor_step` is in body FLU, and gravity and rigid-body integration stay with the simulator. `px4rl_cuda_fleet_reset_plant` replaces a plant and puts its rotors at rest; the controller reset leaves the rotors alone.
 
 ## CPU vs GPU agreement
 
@@ -101,6 +105,10 @@ See `docs/architecture.md` and `experiments/nvcc_probe/`.
 | `tools/annotate_hd.py` | Inserts the execution-space macro into vendored sources |
 | `experiments/nvcc_probe/` | The original device-compilation feasibility probe |
 | `docs/` | Architecture, Iris parameter sources |
+
+## Authors
+
+px4-rl was conceived and directed by Zhaohong Liu and implemented together with Claude (Anthropic), an AI coding agent. See `AUTHORS.md`.
 
 ## License
 
