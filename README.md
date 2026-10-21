@@ -27,7 +27,7 @@ as PX4 SITL: quantized PWM, then rotor-speed lag, then thrust and drag.
 | Gazebo-faithful rotor model, ENU/FLU ↔ NED/FRD frames | ✓ | ✓ |
 | Rotor plant in the fleet (`rotor_step`: PWM → wrench) | ✓ | ✓ (batched fleet, C API) |
 | Iris airframe (PX4 SITL parameters, controller and plant) | ✓ | ✓ |
-| Python bindings (ctypes GPU, pybind11 CPU) | planned | planned |
+| Python package: `CpuFleet` and single-vehicle classes (pybind11, numpy), `CudaFleet` (ctypes, torch) | ✓ | ✓ |
 
 ## Build
 
@@ -79,11 +79,67 @@ px4rl_cuda_rate_step(fleet, rates_sp, thrust_body, rates, angular_accel, dt, NUL
 px4rl_cuda_rotor_step(fleet, pwm, NULL, body_vel_flu, body_rates_flu, dt, force_flu, torque_flu, NULL, stream);
 ```
 
-How the API behaves:
+How the C API behaves:
 - Step calls only launch kernels on the given stream. They never allocate or synchronize, so they can be captured in CUDA graphs.
 - The shared library exports only `px4rl_*` C symbols. It does not depend on the Python or PyTorch version; a PyTorch user passes `tensor.data_ptr()` and `torch.cuda.current_stream().cuda_stream`.
 - All PX4-side quantities use PX4's frames: NED world, FRD body, Hamilton quaternions (w, x, y, z). `include/px4rl/frames.hpp` converts to and from ENU/FLU.
 - The rotor plant works in the Gazebo / Isaac Lab frames: the wrench returned by `px4rl_cuda_rotor_step` is in body FLU, and gravity and rigid-body integration stay with the simulator. `px4rl_cuda_fleet_reset_plant` replaces a plant and puts its rotors at rest; the controller reset leaves the rotors alone.
+
+**Python.** The package builds with scikit-build-core, which needs CMake ≥ 3.18 and a C++17 compiler (pybind11 is fetched as a build dependency):
+
+```bash
+pip install .                                          # CPU: px4rl.CpuFleet and the single-vehicle classes
+pip install . -C cmake.define.PX4RL_BUILD_CUDA=ON      # also ships libpx4rl_cuda.so for px4rl.cuda (CUDA toolkit)
+```
+
+`import px4rl` needs only numpy; `px4rl.cuda` needs torch. The CPU and GPU fleets have the same methods, and every step returns a named tuple of buffers the fleet owns (the next call overwrites them, so clone to keep; `out=` writes into your own arrays instead).
+
+```python
+import numpy as np
+import px4rl
+
+n = 1024
+fleet = px4rl.CpuFleet(n)                       # num_threads=0 uses the OpenMP default, 1 runs serially
+fleet.reset(px4rl.iris_params())                # one Params for all vehicles; px4rl.params_array(n) gives one each
+zeros = lambda *shape: np.zeros(shape, np.float32)
+q = np.tile(np.float32([1, 0, 0, 0]), (n, 1))
+# velocity + yaw: 1 m/s along x, heading 0 (builders for position, velocity and acceleration + yaw)
+setpoint = px4rl.setpoints.velocity_yaw(np.tile(np.float32([1, 0, 0]), (n, 1)), yaw=0.0)
+
+p = fleet.position_step(zeros(n, 3), zeros(n, 3), zeros(n), zeros(n), setpoint, dt=0.02, time_us=20_000)
+a = fleet.attitude_step(q)                      # uses p's attitude and thrust setpoint
+r = fleet.rate_step(a.rates_sp, a.thrust_body, zeros(n, 3), zeros(n, 3), dt=0.004)
+w = fleet.rotor_step(r.actuator, zeros(n, 3), dt=0.004)   # w.force, w.torque: wrench on the body, FLU
+```
+
+The CPU fleet parallelises over vehicles with OpenMP. On shared or heavily loaded machines, the default team (all cores, busy-waiting barriers) can be far slower than a few threads: pass `num_threads`, or set `OMP_NUM_THREADS` / `OMP_WAIT_POLICY=passive`.
+
+On the GPU the same calls take float32 CUDA tensors and run on the current torch stream. A step allocates nothing, so a whole chain can be captured in a `torch.cuda.CUDAGraph` (`dt` and `time_us` are fixed at capture):
+
+```python
+import torch
+from px4rl.cuda import CudaFleet
+
+fleet = CudaFleet(n, device="cuda:0")
+fleet.reset(px4rl.iris_params())
+z1, z3 = torch.zeros(n, device="cuda"), torch.zeros(n, 3, device="cuda")
+q = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device="cuda").repeat(n, 1)
+setpoint = px4rl.setpoints.velocity_yaw(torch.tensor([[1.0, 0.0, 0.0]], device="cuda").repeat(n, 1), yaw=0.0)
+
+def chain():
+    fleet.position_step(z3, z3, z1, z1, setpoint, dt=0.02, time_us=20_000)
+    a = fleet.attitude_step(q)
+    r = fleet.rate_step(a.rates_sp, a.thrust_body, z3, z3, dt=0.004)
+    return fleet.rotor_step(r.actuator, z3, dt=0.004)
+
+chain()                                   # warm-up (advances the state by one step)
+graph = torch.cuda.CUDAGraph()
+with torch.cuda.graph(graph):
+    wrench = chain()
+graph.replay()                            # the four steps in one launch; wrench.force, wrench.torque
+```
+
+Single vehicles, for code that does not batch: `px4rl.Vehicle` (the whole chain), `AttitudeController`, `RateController`, `ControlAllocator`, `ActuatorOutput`, `PositionController` and `HoverThrustEstimator`, each configured from a `Params` and taking numpy arrays or tuples.
 
 ## CPU vs GPU agreement
 

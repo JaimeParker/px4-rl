@@ -123,6 +123,17 @@ The rotor step (`px4rl_cuda_rotor_step`, PWM to wrench) takes 5.2 µs at 4 096 v
 
 `Vehicle` is stored array-of-structures. Since the position loop was added it holds about 2 KB of controller state, and a rate step touches only part of it. Specialising the allocator to the actual rotor count and laying out hot state separately are the main levers for further speed.
 
+## Python package
+
+`pip install .` builds the package with scikit-build-core (`pyproject.toml`); `-C cmake.define.PX4RL_BUILD_CUDA=ON` adds `libpx4rl_cuda.so`. It contains:
+- `px4rl._cpu`, a pybind11 module over `px4rl::fleet`: `CpuFleet` on float32 C-contiguous numpy arrays, one class per controller block, `Vehicle` for the whole chain, and the parameter factories. A CPU-only install needs no CUDA library.
+- `px4rl.cuda.CudaFleet`, a ctypes binding of the C API on torch CUDA tensors. It checks device, dtype, shape and contiguity of every input (`ValueError`), launches on the current torch stream and writes into buffers allocated once at construction, so steps allocate nothing and can be captured in a CUDA graph. Importing `px4rl` does not import torch; only `px4rl.cuda` does.
+- The parameter structs as ctypes classes (`Params`, `PlantParams`, `RigidBodyParams`, `RotorParams`). `tools/gen_ctypes.py` generates them from `include/px4rl/c_api.h` and `plant.h` at build time, together with the integer constants. There is no hand-written mirror to drift. At import, `ctypes.sizeof` of each struct is compared with `px4rl_params_size()`, `px4rl_plant_params_size()` and `px4rl_rigid_body_params_size()` of the pybind module and of the CUDA library, and a mismatch is an `ImportError`.
+
+One `Params` type serves both backends: the pybind classes read it through the buffer protocol (item size and count are checked), the CUDA library takes a pointer to it.
+
+**CpuFleet threads.** `CpuFleet(n, num_threads)` applies `num_threads` to every call with an OpenMP clause; 0 uses the OpenMP default and the results do not depend on the setting. Fleets of fewer than 64 vehicles run serially. Each step is a short parallel region, so on a machine whose cores are shared with other work, the default (one thread per hardware thread) can be far slower than a few threads: OpenMP's barriers busy-wait, and a descheduled thread stalls all the others. The threading test (`tests/fleet/fleet_cpu_threading_test.cpp`) prints throughput at N = 4096. On a 64-thread host with a load average of about 45, a chain step (position, attitude, rate, rotor) took 5.4 ms on 1 thread, 1.7 ms on 4 and 69 ms with the default; `OMP_WAIT_POLICY=passive` brought the default to 1.0 ms. Pick `num_threads` for shared machines, or set that variable.
+
 ## Verification
 
 1. **Source identity.** Vendored files differ from upstream PX4 only by the `PX4RL_HD` macro and the edits listed in `px4/PROVENANCE.md`.
@@ -131,4 +142,4 @@ The rotor step (`px4rl_cuda_rotor_step`, PWM to wrench) takes 5.2 µs at 4 096 v
    - The upstream PX4 unit tests: `PositionControlTest`, `ControlMathTest`, `zero_order_hover_thrust_ekf_test`.
    - px4-rl's own module, plant and frame tests.
 3. **CPU vs GPU parity**, as above.
-4. **Packaging.** A CMake-consumer test installs px4-rl and builds an external project against it.
+4. **Packaging.** A CMake-consumer test installs px4-rl and builds an external project against it. The Python tests (`tests/python`) run against the installed package: the pybind classes against `CpuFleet`, `CudaFleet` against `CpuFleet` within the single-step thresholds above, a non-default stream, CUDA-graph replay against eager steps, and a flat `torch.cuda.memory_allocated` over 100 steps.

@@ -3,7 +3,7 @@ project(px4rl VERSION 0.1.0 LANGUAGES CXX)
 
 option(PX4RL_BUILD_TESTS "Build the C++ tests" ON)
 option(PX4RL_BUILD_CUDA "Build the CUDA library and its tests" OFF)
-option(PX4RL_BUILD_PYTHON "Build the Python bindings (not implemented yet)" OFF)
+option(PX4RL_BUILD_PYTHON "Build the Python package files (pybind11 module, generated ctypes structs); pip install . sets it" OFF)
 option(PX4RL_OPENMP "Parallelise CpuFleet over vehicles with OpenMP when available" ON)
 option(PX4RL_STRICT_FP "Disable FMA contraction (--fmad=false, -ffp-contract=off) for tight CPU/GPU comparison" OFF)
 
@@ -51,6 +51,9 @@ endif()
 
 add_subdirectory(px4)
 add_subdirectory(src)
+if(PX4RL_BUILD_PYTHON)
+	add_subdirectory(src/python)
+endif()
 
 install(DIRECTORY include/px4rl
 	DESTINATION include

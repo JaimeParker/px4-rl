@@ -185,6 +185,21 @@ void px4rl_params_default(px4rl_params *p)
 	*p = px4rl::defaultParams();
 }
 
+size_t px4rl_params_size(void)
+{
+	return sizeof(px4rl_params);
+}
+
+size_t px4rl_plant_params_size(void)
+{
+	return sizeof(px4rl_plant_params);
+}
+
+size_t px4rl_rigid_body_params_size(void)
+{
+	return sizeof(px4rl_rigid_body_params);
+}
+
 const char *px4rl_last_error(void)
 {
 	return g_last_error;

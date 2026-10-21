@@ -4,6 +4,10 @@
 #include <stdexcept>
 #include <string>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include "px4rl/airframes.h"
 #include "px4rl/step_io.hpp"
 
@@ -12,12 +16,27 @@ namespace px4rl {
 namespace {
 // Below this size the OpenMP fork/join costs more than the loop.
 constexpr int kMinParallelVehicles = 64;
+
+// OpenMP requires a positive num_threads clause, so the "default" setting is resolved per call.
+int resolveThreads(int num_threads)
+{
+#ifdef _OPENMP
+	return num_threads > 0 ? num_threads : omp_get_max_threads();
+#else
+	(void)num_threads;
+	return 1;
+#endif
+}
 } // namespace
 
-CpuFleet::CpuFleet(int n)
+CpuFleet::CpuFleet(int n, int num_threads) : num_threads_(num_threads)
 {
 	if (n < 1) {
 		throw std::invalid_argument("CpuFleet: n must be >= 1");
+	}
+
+	if (num_threads < 0) {
+		throw std::invalid_argument("CpuFleet: num_threads must be >= 0");
 	}
 
 	vehicles_.resize(static_cast<size_t>(n));
@@ -50,8 +69,9 @@ void CpuFleet::reset(const uint8_t *mask, const px4rl_params *params, int n_para
 	}
 
 	const int stride = n_params == 1 ? 0 : 1;
+	[[maybe_unused]] const int threads = resolveThreads(num_threads_);
 
-#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles)
+#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles) num_threads(threads)
 	for (int i = 0; i < n; ++i) {
 		if (mask == nullptr || mask[i] != 0) {
 			vehicles_[i] = Vehicle();
@@ -75,8 +95,9 @@ void CpuFleet::resetPlant(const uint8_t *mask, const px4rl_plant_params *plants,
 	}
 
 	const int stride = n_plants == 1 ? 0 : 1;
+	[[maybe_unused]] const int threads = resolveThreads(num_threads_);
 
-#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles)
+#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles) num_threads(threads)
 	for (int i = 0; i < n; ++i) {
 		if (mask == nullptr || mask[i] != 0) {
 			plants_[i].configure(plants[stride * i]);
@@ -93,8 +114,9 @@ void CpuFleet::positionStep(const float *position, const float *velocity, const 
 					  in_air,       dt,                 time_us,   q_sp_out,       thrust_sp_body_out,
 					  yawspeed_out, hover_thrust_out,   outcome_out};
 	const int n = size();
+	[[maybe_unused]] const int threads = resolveThreads(num_threads_);
 
-#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles)
+#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles) num_threads(threads)
 	for (int i = 0; i < n; ++i) {
 		positionStepAt(vehicles_[i], i, buffers);
 	}
@@ -105,8 +127,9 @@ void CpuFleet::attitudeStep(const float *q, const float *q_sp, const float *yaws
 {
 	const AttitudeStepBuffers buffers{q, q_sp, yawspeed_ff, thrust_sp_body, rates_sp_out, thrust_body_out};
 	const int n = size();
+	[[maybe_unused]] const int threads = resolveThreads(num_threads_);
 
-#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles)
+#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles) num_threads(threads)
 	for (int i = 0; i < n; ++i) {
 		attitudeStepAt(vehicles_[i], i, buffers);
 	}
@@ -119,8 +142,9 @@ void CpuFleet::rateStep(const float *rates_sp, const float *thrust_body, const f
 	const RateStepBuffers buffers{rates_sp, thrust_body, rates, angular_accel, dt, landed, motors_out,
 				      actuator_out, torque_sp_out};
 	const int n = size();
+	[[maybe_unused]] const int threads = resolveThreads(num_threads_);
 
-#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles)
+#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles) num_threads(threads)
 	for (int i = 0; i < n; ++i) {
 		rateStepAt(vehicles_[i], i, buffers);
 	}
@@ -137,8 +161,9 @@ void CpuFleet::rotorStep(const float *actuator, const uint8_t *armed, const floa
 	const RotorStepBuffers buffers{actuator,      armed,          body_velocity_flu, body_rates_flu,
 				       dt,            force_flu_out,  torque_flu_out,    rotor_force_flu_out};
 	const int n = size();
+	[[maybe_unused]] const int threads = resolveThreads(num_threads_);
 
-#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles)
+#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles) num_threads(threads)
 	for (int i = 0; i < n; ++i) {
 		rotorStepAt(plants_[i], i, buffers);
 	}

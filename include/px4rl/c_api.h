@@ -3,6 +3,7 @@
 #ifndef PX4RL_C_API_H
 #define PX4RL_C_API_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #if defined(__GNUC__)
@@ -106,6 +107,13 @@ typedef struct px4rl_params {
 #define PX4RL_OUTCOME_OK 0       /* the commanded setpoint was executed */
 #define PX4RL_OUTCOME_FALLBACK 1 /* it was invalid; the last valid one (less than 200 ms old) was executed */
 #define PX4RL_OUTCOME_FAILSAFE 2 /* neither was usable; PX4's failsafe setpoint was executed */
+
+/* sizeof the parameter structs of this build (px4rl_params here, px4rl_plant_params and
+ * px4rl_rigid_body_params in plant.h). A binding that lays the structs out on its own side compares its size
+ * with these at load time to detect a mismatch between the header it was generated from and the library. */
+PX4RL_API size_t px4rl_params_size(void);
+PX4RL_API size_t px4rl_plant_params_size(void);
+PX4RL_API size_t px4rl_rigid_body_params_size(void);
 
 /* Fills `p` from the px4_stack struct defaults, geometry createQuadXIris(). */
 PX4RL_API void px4rl_params_default(px4rl_params *p);

@@ -14,10 +14,15 @@ namespace px4rl {
 class CpuFleet {
 public:
 	/// Constructs n vehicles with px4rl_params_default() and gives each the Iris plant (px4rl_plant_params_iris())
-	/// with its rotors at rest. Throws std::invalid_argument if n < 1.
-	explicit CpuFleet(int n);
+	/// with its rotors at rest. `num_threads` is the OpenMP thread count of every call; 0 uses the OpenMP default
+	/// (OMP_NUM_THREADS, otherwise one thread per hardware thread) and 1 runs serially. It has no effect without
+	/// OpenMP. The results do not depend on it. Throws std::invalid_argument if n < 1 or num_threads < 0.
+	explicit CpuFleet(int n, int num_threads = 0);
 
 	int size() const { return static_cast<int>(vehicles_.size()); }
+
+	/// The constructor argument; 0 means the OpenMP default.
+	int numThreads() const { return num_threads_; }
 
 	/// mask: host uint8[n] or nullptr (= all). n_params must be 1 (broadcast) or n, otherwise
 	/// std::invalid_argument is thrown, as it is for parameters that fail validateParams().
@@ -48,6 +53,7 @@ public:
 private:
 	std::vector<Vehicle> vehicles_;
 	std::vector<VehiclePlant> plants_;
+	int num_threads_{0};
 };
 
 } // namespace px4rl

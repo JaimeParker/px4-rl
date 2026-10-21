@@ -76,3 +76,10 @@ docs/internal/
 
 # Probe build outputs
 experiments/*/out/
+
+# Python build artefacts
+__pycache__/
+*.egg-info/
+dist/
+_skbuild/
+.pytest_cache/
