@@ -24,7 +24,7 @@ from ._structs import (
     RotorParams,
 )
 from ._version import __version__
-from .params import default_params, iris_params, iris_plant, iris_rigid_body, params_array
+from .params import default_params, hover_thrust, iris_params, iris_plant, iris_rigid_body, params_array
 
 try:
     from . import _cpu
@@ -80,6 +80,7 @@ __all__ = [
     "OUTCOME_FALLBACK",
     "OUTCOME_FAILSAFE",
     "default_params",
+    "hover_thrust",
     "iris_params",
     "iris_plant",
     "iris_rigid_body",

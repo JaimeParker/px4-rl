@@ -13,6 +13,7 @@
 #include "px4rl/airframes.h"
 #include "px4rl/c_api.h"
 #include "px4rl/cpu_fleet.hpp"
+#include "px4rl/hover_equilibrium.hpp"
 #include "px4rl/params.hpp"
 #include "px4rl/plant.h"
 #include "px4rl/vehicle.hpp"
@@ -457,6 +458,22 @@ PYBIND11_MODULE(_cpu, m)
 	      py::arg("buffer"), "Writes the Iris rotor plant into a PlantParams.");
 	m.def("rigid_body_params_iris", [](const py::object &buffer) { fillStruct(buffer, px4rl_rigid_body_params_iris()); },
 	      py::arg("buffer"), "Writes the Iris mass and inertia into a RigidBodyParams.");
+	m.def("hover_thrust",
+	      [](const py::object &params, const py::object &plant, const py::object &body, float gravity) {
+		      const char *error = nullptr;
+		      const float thrust = px4rl::hoverThrust(singleStruct<px4rl_params>(params, "params"),
+							      singleStruct<px4rl_plant_params>(plant, "plant"),
+							      singleStruct<px4rl_rigid_body_params>(body, "body"), gravity,
+							      &error);
+
+		      if (error != nullptr) {
+			      throw py::value_error(error);
+		      }
+
+		      return thrust;
+	      },
+	      py::arg("params"), py::arg("plant"), py::arg("body"), py::arg("gravity"),
+	      "Hover thrust in MPC_THR_HOVER units; raises ValueError if the vehicle cannot hover.");
 	m.def("params_size", []() { return px4rl_params_size(); }, "sizeof(px4rl_params) in this build.");
 	m.def("plant_params_size", []() { return px4rl_plant_params_size(); }, "sizeof(px4rl_plant_params).");
 	m.def("rigid_body_params_size", []() { return px4rl_rigid_body_params_size(); },

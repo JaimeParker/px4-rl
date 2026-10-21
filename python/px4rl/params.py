@@ -1,5 +1,7 @@
-"""Parameter factories. The values come from the native library, so Python holds no copy of any default."""
+"""Parameter factories and the hover thrust of a vehicle. The values come from the native library, so Python holds
+no copy of any default."""
 import ctypes
+import math
 
 from . import _lib
 from ._structs import Params, PlantParams, RigidBodyParams
@@ -47,6 +49,26 @@ def iris_rigid_body():
         _cpu.rigid_body_params_iris(body)
         return body
     return _lib.load_cuda_library().px4rl_rigid_body_params_iris()
+
+
+def hover_thrust(params=None, plant=None, body=None, gravity=9.80665):
+    """Hover thrust of an upright vehicle in steady flight, in PX4's MPC_THR_HOVER units (normalized collective
+    thrust). Use it to seed `Params.mpc_thr_hover` so an episode can start in steady flight.
+
+    `params`, `plant` and `body` are a `Params`, a `PlantParams` and a `RigidBodyParams`, defaulting to the
+    Gazebo Classic Iris. `gravity` is in m/s^2. Raises ValueError if the vehicle cannot hover (its rotors cannot
+    lift the weight) or an input is invalid.
+    """
+    params = iris_params() if params is None else params
+    plant = iris_plant() if plant is None else plant
+    body = iris_rigid_body() if body is None else body
+    if _cpu is not None:
+        return _cpu.hover_thrust(params, plant, body, gravity)
+    lib = _lib.load_cuda_library()
+    thrust = lib.px4rl_hover_thrust(ctypes.byref(params), ctypes.byref(plant), ctypes.byref(body), gravity)
+    if math.isnan(thrust):
+        raise ValueError(lib.px4rl_last_error().decode(errors="replace"))
+    return thrust
 
 
 def params_array(n, base=None):

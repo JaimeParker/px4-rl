@@ -18,6 +18,7 @@
 
 #include "px4rl/airframes.h"
 #include "px4rl/c_api.h"
+#include "px4rl/hover_equilibrium.hpp"
 #include "px4rl/params.hpp"
 #include "px4rl/step_io.hpp"
 #include "px4rl/hover_thrust_module.hpp"
@@ -198,6 +199,24 @@ size_t px4rl_plant_params_size(void)
 size_t px4rl_rigid_body_params_size(void)
 {
 	return sizeof(px4rl_rigid_body_params);
+}
+
+float px4rl_hover_thrust(const px4rl_params *params, const px4rl_plant_params *plant,
+			 const px4rl_rigid_body_params *body, float gravity)
+{
+	if (params == nullptr || plant == nullptr || body == nullptr) {
+		failInvalid("px4rl_hover_thrust: params, plant and body must not be null");
+		return std::nanf("");
+	}
+
+	const char *error = nullptr;
+	const float thrust = px4rl::hoverThrust(*params, *plant, *body, gravity, &error);
+
+	if (error != nullptr) {
+		failInvalid(error);
+	}
+
+	return thrust;
 }
 
 const char *px4rl_last_error(void)

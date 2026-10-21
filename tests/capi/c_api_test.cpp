@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -284,6 +285,20 @@ TEST(CApi, IrisFunctionsAreExportedByTheCudaLibrary)
 	EXPECT_EQ(plant.num_rotors, 4);
 	EXPECT_EQ(plant.rotor[0].motor_constant, 5.84e-06f);
 	EXPECT_EQ(px4rl_rigid_body_params_iris().mass, 1.5f);
+}
+
+TEST(CApi, HoverThrustIsExportedByTheCudaLibraryAndReportsWhyItFailed)
+{
+	px4rl_params params;
+	px4rl_params_iris(&params);
+	const px4rl_plant_params plant = px4rl_plant_params_iris();
+	px4rl_rigid_body_params body = px4rl_rigid_body_params_iris();
+	EXPECT_NEAR(px4rl_hover_thrust(&params, &plant, &body, 9.80665f), 0.6935f, 5e-4f);
+
+	body.mass = 3.f;
+	EXPECT_TRUE(std::isnan(px4rl_hover_thrust(&params, &plant, &body, 9.80665f)));
+	EXPECT_NE(std::string(px4rl_last_error()).find("balances the weight"), std::string::npos);
+	EXPECT_TRUE(std::isnan(px4rl_hover_thrust(nullptr, &plant, &body, 9.80665f)));
 }
 
 TEST(CApi, RotorStepOfTheDefaultIrisPlantBalancesWeightAtHoverCommand)

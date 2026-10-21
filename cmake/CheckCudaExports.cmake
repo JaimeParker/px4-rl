@@ -16,7 +16,7 @@ message(STATUS "nm -D --defined-only ${LIBRARY}:\n${nm_output}")
 
 set(expected
 	px4rl_params_default px4rl_params_iris px4rl_last_error
-	px4rl_plant_params_iris px4rl_rigid_body_params_iris
+	px4rl_plant_params_iris px4rl_rigid_body_params_iris px4rl_hover_thrust
 	px4rl_params_size px4rl_plant_params_size px4rl_rigid_body_params_size
 	px4rl_cuda_fleet_create px4rl_cuda_fleet_destroy px4rl_cuda_fleet_size px4rl_cuda_fleet_reset
 	px4rl_cuda_fleet_reset_plant

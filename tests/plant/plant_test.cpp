@@ -365,3 +365,90 @@ TEST(Frames, LevelBodyFacingEastIsLevelNedFacingEast)
 	const matrix::Vector3f down = q_ned_frd.rotateVector(matrix::Vector3f(0.f, 0.f, 1.f));
 	EXPECT_NEAR(down(2), 1.f, 1e-6f);
 }
+
+// ---- hover thrust (px4rl_hover_thrust) ----
+
+namespace {
+
+px4rl_params irisController()
+{
+	px4rl_params params;
+	px4rl_params_iris(&params);
+	return params;
+}
+
+// The hover actuator value of the Iris plant, closed form: 4 k_f (1000 u + 100)^2 = m g.
+float irisHoverActuatorValue(float mass)
+{
+	const px4rl_rotor_params rotor = irisRotor(0);
+	const float speed = std::sqrt(mass * kG / (4.f * rotor.motor_constant));
+	return (speed - rotor.zero_position_armed) / rotor.input_scaling;
+}
+
+} // namespace
+
+TEST(HoverThrust, IrisHoversAtTheDocumentedActuatorValue)
+{
+	const px4rl_params params = irisController();
+	const px4rl_plant_params plant = px4rl_plant_params_iris();
+	const px4rl_rigid_body_params body = px4rl_rigid_body_params_iris();
+
+	const float thrust = px4rl_hover_thrust(&params, &plant, &body, kG);
+	std::printf("iris hover thrust = %.5f (THR_MDL_FAC = %.2f)\n", thrust, params.thr_mdl_fac);
+	EXPECT_NEAR(thrust, 0.6935f, 5e-4f);
+	// THR_MDL_FAC is 0 for the Iris, so the collective thrust equals the actuator value.
+	EXPECT_NEAR(thrust, irisHoverActuatorValue(body.mass), 1e-5f);
+}
+
+TEST(HoverThrust, ThrustModelFactorMapsTheActuatorValueThroughTheForwardCurve)
+{
+	px4rl_params params = irisController();
+	const px4rl_plant_params plant = px4rl_plant_params_iris();
+	const px4rl_rigid_body_params body = px4rl_rigid_body_params_iris();
+
+	const float actuator_value = px4rl_hover_thrust(&params, &plant, &body, kG);
+	params.thr_mdl_fac = 0.3f;
+	EXPECT_NEAR(px4rl_hover_thrust(&params, &plant, &body, kG),
+		    0.3f * actuator_value * actuator_value + 0.7f * actuator_value, 1e-6f);
+}
+
+TEST(HoverThrust, HeavierVehicleNeedsMoreThrustAndOneBeyondTheRotorsCannotHover)
+{
+	const px4rl_params params = irisController();
+	const px4rl_plant_params plant = px4rl_plant_params_iris();
+	px4rl_rigid_body_params body = px4rl_rigid_body_params_iris();
+	const float iris_thrust = px4rl_hover_thrust(&params, &plant, &body, kG);
+
+	body.mass = 1.8f;
+	EXPECT_NEAR(px4rl_hover_thrust(&params, &plant, &body, kG), irisHoverActuatorValue(1.8f), 1e-5f);
+	EXPECT_GT(px4rl_hover_thrust(&params, &plant, &body, kG), iris_thrust);
+
+	// Full thrust is 4 k_f max_rot_velocity^2 = 28.3 N, below the weight of 3 kg (29.4 N).
+	body.mass = 3.f;
+	EXPECT_TRUE(std::isnan(px4rl_hover_thrust(&params, &plant, &body, kG)));
+}
+
+TEST(HoverThrust, InvalidInputsGiveNaN)
+{
+	const px4rl_params params = irisController();
+	const px4rl_plant_params plant = px4rl_plant_params_iris();
+	const px4rl_rigid_body_params body = px4rl_rigid_body_params_iris();
+
+	EXPECT_TRUE(std::isnan(px4rl_hover_thrust(nullptr, &plant, &body, kG)));
+	EXPECT_TRUE(std::isnan(px4rl_hover_thrust(&params, nullptr, &body, kG)));
+	EXPECT_TRUE(std::isnan(px4rl_hover_thrust(&params, &plant, nullptr, kG)));
+	EXPECT_TRUE(std::isnan(px4rl_hover_thrust(&params, &plant, &body, 0.f)));
+	EXPECT_TRUE(std::isnan(px4rl_hover_thrust(&params, &plant, &body, -kG)));
+
+	px4rl_rigid_body_params massless = body;
+	massless.mass = 0.f;
+	EXPECT_TRUE(std::isnan(px4rl_hover_thrust(&params, &plant, &massless, kG)));
+
+	px4rl_params bad_curve = params;
+	bad_curve.thr_mdl_fac = 1.5f;
+	EXPECT_TRUE(std::isnan(px4rl_hover_thrust(&bad_curve, &plant, &body, kG)));
+
+	px4rl_plant_params no_rotors = plant;
+	no_rotors.num_rotors = 0;
+	EXPECT_TRUE(std::isnan(px4rl_hover_thrust(&params, &no_rotors, &body, kG)));
+}

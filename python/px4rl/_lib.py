@@ -79,6 +79,9 @@ def _declare(lib):
     lib.px4rl_rigid_body_params_iris.restype = _structs.RigidBodyParams
     lib.px4rl_rigid_body_params_iris.argtypes = []
 
+    lib.px4rl_hover_thrust.restype = ctypes.c_float
+    lib.px4rl_hover_thrust.argtypes = [void_p, void_p, void_p, ctypes.c_float]
+
     lib.px4rl_cuda_fleet_create.restype = ctypes.c_int
     lib.px4rl_cuda_fleet_create.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(void_p)]
     lib.px4rl_cuda_fleet_destroy.restype = ctypes.c_int

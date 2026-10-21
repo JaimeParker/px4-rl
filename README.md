@@ -139,6 +139,8 @@ with torch.cuda.graph(graph):
 graph.replay()                            # the four steps in one launch; wrench.force, wrench.torque
 ```
 
+`px4rl.hover_thrust(params, plant, body, gravity)` (C: `px4rl_hover_thrust`, `include/px4rl/airframes.h`) returns the thrust at which a vehicle hovers, in PX4's `MPC_THR_HOVER` units (Iris: 0.6935); seed `params.mpc_thr_hover` with it to start an episode in steady flight.
+
 Single vehicles, for code that does not batch: `px4rl.Vehicle` (the whole chain), `AttitudeController`, `RateController`, `ControlAllocator`, `ActuatorOutput`, `PositionController` and `HoverThrustEstimator`, each configured from a `Params` and taking numpy arrays or tuples.
 
 ## CPU vs GPU agreement

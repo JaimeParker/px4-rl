@@ -310,6 +310,14 @@ TEST(IrisClosedLoop, HoverHoldsAndHoverThrustEstimateConverges)
 	EXPECT_LE(max_horizontal_drift, 0.3f);
 	EXPECT_LE(max_altitude_error_after_5s, 0.3f);
 	EXPECT_NEAR(estimate, measured_hover_thrust, 0.03f);
+
+	const px4rl_plant_params plant = px4rl_plant_params_iris();
+	const px4rl_rigid_body_params body = px4rl_rigid_body_params_iris();
+	const px4rl_params params = irisParams();
+	const float predicted_hover_thrust = px4rl_hover_thrust(&params, &plant, &body, kGravity);
+	std::printf("iris hover: px4rl_hover_thrust = %.4f, measured collective thrust = %.4f\n", predicted_hover_thrust,
+		    measured_hover_thrust);
+	EXPECT_NEAR(measured_hover_thrust, predicted_hover_thrust, 0.003f);
 	EXPECT_EQ(loop.outcomeCounts()[1] + loop.outcomeCounts()[2], 0);
 }
 

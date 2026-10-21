@@ -1,6 +1,7 @@
 add_library(px4rl_fleet STATIC
 	cpu/cpu_fleet.cpp
 	cpu/c_params.cpp
+	cpu/c_hover_thrust.cpp
 	airframes/iris.cpp
 )
 add_library(px4rl::fleet ALIAS px4rl_fleet)

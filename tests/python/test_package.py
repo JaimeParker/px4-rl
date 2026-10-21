@@ -135,6 +135,55 @@ def test_cuda_library_check_runs_at_import_when_the_library_is_present():
         assert lib.px4rl_rigid_body_params_size() == ctypes.sizeof(px4rl.RigidBodyParams)
 
 
+def iris_hover_actuator_value(body):
+    """Closed form for the Iris plant, whose four rotors share one motor constant: 4 k_f (1000 u + 100)^2 = m g."""
+    rotor = px4rl.iris_plant().rotor[0]
+    speed = (body.mass * 9.80665 / (4 * rotor.motor_constant)) ** 0.5
+    return (speed - rotor.zero_position_armed) / rotor.input_scaling
+
+
+def test_hover_thrust_defaults_to_the_iris_and_follows_the_thrust_model_factor():
+    expected = iris_hover_actuator_value(px4rl.iris_rigid_body())
+    assert px4rl.hover_thrust() == pytest.approx(0.6935, abs=5e-4)
+    assert px4rl.hover_thrust() == pytest.approx(expected, abs=1e-5)  # THR_MDL_FAC is 0 for the Iris
+    if _lib.has_cuda_library():
+        c_value = _lib.load_cuda_library().px4rl_hover_thrust(
+            ctypes.byref(px4rl.iris_params()), ctypes.byref(px4rl.iris_plant()),
+            ctypes.byref(px4rl.iris_rigid_body()), 9.80665)
+        assert px4rl.hover_thrust() == c_value
+
+    params = px4rl.iris_params()
+    params.thr_mdl_fac = 0.3
+    assert px4rl.hover_thrust(params) == pytest.approx(0.3 * expected**2 + 0.7 * expected, abs=1e-5)
+
+    body = px4rl.iris_rigid_body()
+    body.mass = 1.8
+    assert px4rl.hover_thrust(body=body) > px4rl.hover_thrust()
+
+
+def test_hover_thrust_raises_value_error_when_the_vehicle_cannot_hover_or_an_input_is_invalid():
+    body = px4rl.iris_rigid_body()
+    body.mass = 3.0  # the rotors lift at most 28.3 N, the weight is 29.4 N
+    with pytest.raises(ValueError, match="weight"):
+        px4rl.hover_thrust(body=body)
+    with pytest.raises(ValueError, match="gravity"):
+        px4rl.hover_thrust(gravity=0.0)
+
+
+def test_hover_thrust_through_ctypes_matches_pybind(monkeypatch):
+    if not _lib.has_cuda_library():
+        pytest.skip("px4rl was built without CUDA, so there is no ctypes path")
+    from px4rl import params as params_module
+
+    expected = px4rl.hover_thrust()
+    monkeypatch.setattr(params_module, "_cpu", None)
+    assert params_module.hover_thrust() == pytest.approx(expected, abs=1e-6)
+    body = px4rl.iris_rigid_body()
+    body.mass = 3.0
+    with pytest.raises(ValueError, match="weight"):
+        params_module.hover_thrust(body=body)
+
+
 def test_params_array_makes_independent_copies():
     base = px4rl.iris_params()
     base.att_roll_p = 5.0
