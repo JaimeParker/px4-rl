@@ -20,6 +20,12 @@ public:
 	/// std::invalid_argument is thrown, as it is for parameters that fail validateParams().
 	void reset(const uint8_t *mask, const px4rl_params *params, int n_params);
 
+	/// Same arguments as px4rl_cuda_position_step, on host pointers; see c_api.h.
+	void positionStep(const float *position, const float *velocity, const float *heading, const float *acceleration_z,
+			  const float *trajectory_sp, const uint8_t *in_air, float dt, uint64_t time_us, float *q_sp_out,
+			  float *thrust_sp_body_out, float *yawspeed_out, float *hover_thrust_out, uint8_t *outcome_out);
+
+	/// q_sp == nullptr uses the setpoint stored by positionStep; see px4rl_cuda_attitude_step.
 	void attitudeStep(const float *q, const float *q_sp, const float *yawspeed_ff, const float *thrust_sp_body,
 			  float *rates_sp_out, float *thrust_body_out);
 

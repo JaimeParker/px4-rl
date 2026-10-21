@@ -17,7 +17,7 @@ message(STATUS "nm -D --defined-only ${LIBRARY}:\n${nm_output}")
 set(expected
 	px4rl_params_default px4rl_last_error
 	px4rl_cuda_fleet_create px4rl_cuda_fleet_destroy px4rl_cuda_fleet_size px4rl_cuda_fleet_reset
-	px4rl_cuda_attitude_step px4rl_cuda_rate_step
+	px4rl_cuda_position_step px4rl_cuda_attitude_step px4rl_cuda_rate_step
 )
 
 string(REPLACE "\n" ";" lines "${nm_output}")

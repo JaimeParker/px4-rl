@@ -51,6 +51,22 @@ void CpuFleet::reset(const uint8_t *mask, const px4rl_params *params, int n_para
 	}
 }
 
+void CpuFleet::positionStep(const float *position, const float *velocity, const float *heading,
+			    const float *acceleration_z, const float *trajectory_sp, const uint8_t *in_air, float dt,
+			    uint64_t time_us, float *q_sp_out, float *thrust_sp_body_out, float *yawspeed_out,
+			    float *hover_thrust_out, uint8_t *outcome_out)
+{
+	const PositionStepBuffers buffers{position,     velocity,           heading,   acceleration_z, trajectory_sp,
+					  in_air,       dt,                 time_us,   q_sp_out,       thrust_sp_body_out,
+					  yawspeed_out, hover_thrust_out,   outcome_out};
+	const int n = size();
+
+#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles)
+	for (int i = 0; i < n; ++i) {
+		positionStepAt(vehicles_[i], i, buffers);
+	}
+}
+
 void CpuFleet::attitudeStep(const float *q, const float *q_sp, const float *yawspeed_ff, const float *thrust_sp_body,
 			    float *rates_sp_out, float *thrust_body_out)
 {

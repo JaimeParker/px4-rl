@@ -8,10 +8,31 @@
 
 namespace px4rl {
 
+static_assert(static_cast<uint8_t>(PositionModule::Outcome::Ok) == PX4RL_OUTCOME_OK &&
+	      static_cast<uint8_t>(PositionModule::Outcome::Fallback) == PX4RL_OUTCOME_FALLBACK &&
+	      static_cast<uint8_t>(PositionModule::Outcome::Failsafe) == PX4RL_OUTCOME_FAILSAFE,
+	      "PX4RL_OUTCOME_* must match PositionModule::Outcome");
+
+struct PositionStepBuffers {
+	const float *position;         // n,3
+	const float *velocity;         // n,3
+	const float *heading;          // n
+	const float *acceleration_z;   // n
+	const float *trajectory_sp;    // n,11: position[3] velocity[3] acceleration[3] yaw yawspeed
+	const uint8_t *in_air;         // n or nullptr
+	float dt;
+	uint64_t time_us;
+	float *q_sp_out;               // n,4
+	float *thrust_sp_body_out;     // n,3
+	float *yawspeed_out;           // n
+	float *hover_thrust_out;       // n or nullptr
+	uint8_t *outcome_out;          // n or nullptr
+};
+
 struct AttitudeStepBuffers {
 	const float *q;               // n,4
-	const float *q_sp;            // n,4
-	const float *yawspeed_ff;     // n or nullptr
+	const float *q_sp;            // n,4 or nullptr (= setpoint of the last position step)
+	const float *yawspeed_ff;     // n or nullptr; ignored when q_sp is nullptr
 	const float *thrust_sp_body;  // n,3
 	float *rates_sp_out;          // n,3
 	float *thrust_body_out;       // n,3
@@ -29,16 +50,52 @@ struct RateStepBuffers {
 	float *torque_sp_out;         // n,3 or nullptr
 };
 
+PX4RL_HD inline void positionStepAt(Vehicle &vehicle, int i, const PositionStepBuffers &b)
+{
+	const float *sp = b.trajectory_sp + 11 * i;
+	trajectory_setpoint_s setpoint{b.time_us, {sp[0], sp[1], sp[2]}, {sp[3], sp[4], sp[5]}, {sp[6], sp[7], sp[8]},
+				       {NAN, NAN, NAN}, sp[9], sp[10]};
+
+	PositionStepResult result;
+	vehicle.positionStep(detail::load(b.position + 3 * i), detail::load(b.velocity + 3 * i), b.heading[i],
+			     b.acceleration_z[i], setpoint, b.in_air == nullptr || b.in_air[i] != 0, b.dt, b.time_us,
+			     result);
+
+	for (int k = 0; k < 4; ++k) {
+		b.q_sp_out[4 * i + k] = result.q_sp(k);
+	}
+
+	detail::store(b.thrust_sp_body_out + 3 * i, result.thrust_sp_body);
+	b.yawspeed_out[i] = result.yawspeed;
+
+	if (b.hover_thrust_out != nullptr) {
+		b.hover_thrust_out[i] = result.hover_thrust;
+	}
+
+	if (b.outcome_out != nullptr) {
+		b.outcome_out[i] = static_cast<uint8_t>(result.outcome);
+	}
+}
+
 PX4RL_HD inline void attitudeStepAt(Vehicle &vehicle, int i, const AttitudeStepBuffers &b)
 {
 	const float *q = b.q + 4 * i;
-	const float *q_sp = b.q_sp + 4 * i;
-	const float yawspeed_ff = b.yawspeed_ff != nullptr ? b.yawspeed_ff[i] : 0.f;
+	const matrix::Quatf attitude(q[0], q[1], q[2], q[3]);
+	const matrix::Vector3f thrust_sp_body = detail::load(b.thrust_sp_body + 3 * i);
 
 	matrix::Vector3f rates_sp;
 	matrix::Vector3f thrust_body;
-	vehicle.attitudeStep(matrix::Quatf(q[0], q[1], q[2], q[3]), matrix::Quatf(q_sp[0], q_sp[1], q_sp[2], q_sp[3]),
-			     yawspeed_ff, detail::load(b.thrust_sp_body + 3 * i), rates_sp, thrust_body);
+
+	if (b.q_sp == nullptr) {
+		vehicle.attitudeStepFromPosition(attitude, thrust_sp_body, rates_sp, thrust_body);
+
+	} else {
+		const float *q_sp = b.q_sp + 4 * i;
+		const float yawspeed_ff = b.yawspeed_ff != nullptr ? b.yawspeed_ff[i] : 0.f;
+		vehicle.attitudeStep(attitude, matrix::Quatf(q_sp[0], q_sp[1], q_sp[2], q_sp[3]), yawspeed_ff,
+				     thrust_sp_body, rates_sp, thrust_body);
+	}
+
 	detail::store(b.rates_sp_out + 3 * i, rates_sp);
 	detail::store(b.thrust_body_out + 3 * i, thrust_body);
 }

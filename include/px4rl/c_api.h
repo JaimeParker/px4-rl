@@ -66,6 +66,9 @@ typedef struct px4rl_params {
 	float dshot_min_fraction;
 
 	/* PositionModule: PX4 MPC_* parameters, in PX4's units. */
+	float position_dt;       /* s, nominal interval between position_step calls (50 Hz = 0.02). It fixes the
+	                          * velocity filter coefficients at reset, as PX4's measured mean sample interval
+	                          * does; the dt passed to each position_step call only scales that step. */
 	float mpc_xy_p;
 	float mpc_z_p;
 	float mpc_xy_vel_p_acc;
@@ -99,6 +102,11 @@ typedef struct px4rl_params {
 	float hte_vz_thr;        /* m/s */
 } px4rl_params;
 
+/* Per-vehicle result of position_step (px4rl_cuda_position_step and CpuFleet::positionStep). */
+#define PX4RL_OUTCOME_OK 0       /* the commanded setpoint was executed */
+#define PX4RL_OUTCOME_FALLBACK 1 /* it was invalid; the last valid one (less than 200 ms old) was executed */
+#define PX4RL_OUTCOME_FAILSAFE 2 /* neither was usable; PX4's failsafe setpoint was executed */
+
 /* Fills `p` from the px4_stack struct defaults, geometry createQuadXIris(). */
 PX4RL_API void px4rl_params_default(px4rl_params *p);
 
@@ -122,8 +130,48 @@ PX4RL_API int px4rl_cuda_fleet_size(const px4rl_cuda_fleet *f);
 PX4RL_API int px4rl_cuda_fleet_reset(px4rl_cuda_fleet *f, const uint8_t *mask,
 				     const px4rl_params *params_host, int n_params, void *stream);
 
+/* Position / velocity loop (PX4 MulticopterPositionControl and the hover thrust estimator).
+ *
+ * Inputs, per vehicle, in PX4's frames (NED world, FRD body):
+ *   pos, vel      local position [m] and velocity [m/s]
+ *   heading       yaw angle [rad]
+ *   az            vertical acceleration [m/s^2], NED (positive down)
+ *   traj_sp       n x 11 floats: position[3] velocity[3] acceleration[3] yaw yawspeed.
+ *                 NaN means "unused", with PX4 semantics. Command modes by convention:
+ *                   vel + yaw:  (NaN x3, vx vy vz, NaN x3, yaw, NaN)
+ *                   acc + yaw:  (NaN x3, NaN x3, ax ay az, yaw, NaN)
+ *                   pos + yaw:  (px py pz, NaN x3, NaN x3, yaw, NaN)
+ *   in_air        uint8[n] or NULL (= all in air). Gates the hover thrust estimator only.
+ *   dt            seconds since the previous position_step call; clamped to [0.002, 0.04] by the controller.
+ *   time_us       the caller's monotonically increasing microsecond clock; it stamps the setpoint, so the
+ *                 200 ms fallback to the last valid setpoint is measured on it.
+ * The nominal call interval is px4rl_params.position_dt, set through reset.
+ *
+ * Outputs, per vehicle:
+ *   q_sp_out            attitude setpoint (w, x, y, z), body FRD to NED
+ *   thrust_sp_body_out  normalized thrust, body FRD (0, 0, -t)
+ *   yawspeed_out        yaw rate feed-forward [rad/s]
+ *   hover_thrust_out    current hover thrust estimate, or NULL
+ *   outcome_out         PX4RL_OUTCOME_* per vehicle, or NULL
+ *
+ * The estimator uses the attitude seen by the last attitude_step and the thrust of the last rate_step, so it
+ * starts after the first rate_step. The attitude setpoint is also stored: attitude_step(q_sp = NULL)
+ * consumes it. Command modes that bypass this call: CTA calls attitude_step with an explicit q_sp, CTBR calls
+ * rate_step directly, and direct motor commands do not involve px4-rl. */
+PX4RL_API int px4rl_cuda_position_step(px4rl_cuda_fleet *f,
+				       const float *pos /*n,3*/, const float *vel /*n,3*/,
+				       const float *heading /*n*/, const float *az /*n*/,
+				       const float *traj_sp /*n,11*/, const uint8_t *in_air /*n or NULL*/,
+				       float dt, uint64_t time_us,
+				       float *q_sp_out /*n,4*/, float *thrust_sp_body_out /*n,3*/,
+				       float *yawspeed_out /*n*/, float *hover_thrust_out /*n or NULL*/,
+				       uint8_t *outcome_out /*n or NULL*/, void *stream);
+
+/* q_sp = NULL selects the attitude setpoint stored by the last position_step (level, zero yaw rate before
+ * the first one) together with its yaw rate; yawspeed_ff is then ignored. With an explicit q_sp,
+ * yawspeed_ff (n or NULL = 0) is the yaw rate feed-forward. thrust_sp_body is always required. */
 PX4RL_API int px4rl_cuda_attitude_step(px4rl_cuda_fleet *f,
-				       const float *q /*n,4*/, const float *q_sp /*n,4*/,
+				       const float *q /*n,4*/, const float *q_sp /*n,4 or NULL*/,
 				       const float *yawspeed_ff /*n or NULL*/,
 				       const float *thrust_sp_body /*n,3*/,
 				       float *rates_sp_out /*n,3*/, float *thrust_body_out /*n,3*/,

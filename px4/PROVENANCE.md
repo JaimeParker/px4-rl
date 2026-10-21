@@ -122,7 +122,7 @@ fills `unallocated_torque`. Nothing else in the wrapper changed. The hover thrus
 - `vehicle_local_position.vxy_max` (treated as NaN), the xy/z validity flags (a non-finite input is the only
   invalid case), `MPC_TILTMAX_LND` and the "tilt constrained" clamps of `parameters_update` (:118-294:
   responsiveness, SYS_VEHICLE_RESP, MPC_XY_VEL_ALL, MPC_Z_VEL_ALL, tilt/hover/cruise constraining).
-- Running-mean sample interval (`WelfordMean`): `configure()` takes a nominal interval (default 0.01 s, PX4's seed).
+- Running-mean sample interval (`WelfordMean`): `configure()` takes a nominal interval (default 0.01 s, PX4's seed). In the fleets the interval is the per-vehicle parameter `position_dt` (default 0.02 s, a 50 Hz position loop).
 - uORB publications, perf counters, `PX4_WARN`/`mavlink_log`/events output (the failsafe is silent).
 - PX4 starts `_tilt_limit_slew_rate` at 0 and slews at 0.2 rad/s; this is kept. `setTiltLimitStateDeg()` lets a
   caller start from the configured limit.

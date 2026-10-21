@@ -144,6 +144,8 @@ PX4RL_HD inline px4rl_params defaultParams()
 	p.dshot_disarmed = static_cast<float>(out.dshot_disarmed);
 	p.dshot_min_fraction = out.dshot_min_fraction;
 
+	p.position_dt = 0.02f; // 50 Hz; PX4 seeds its running mean of the interval with 0.01 s
+
 	// PX4 v1.16.2 parameter defaults, docs/iris-params-sources.md section 4 (source file:line there).
 	// They are not held in a px4_stack struct, so this is the one place they are written down.
 	p.mpc_xy_p = 0.95f;
@@ -195,6 +197,10 @@ inline const char *validateParams(const px4rl_params &p)
 
 	if (p.output_mode != 0 && p.output_mode != 1) {
 		return "output_mode must be 0 (PWM) or 1 (DShot)";
+	}
+
+	if (!(p.position_dt > 0.f)) {
+		return "position_dt must be > 0";
 	}
 
 	return nullptr;

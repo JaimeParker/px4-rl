@@ -1,4 +1,5 @@
-// Time per attitude_step and rate_step call of the CUDA fleet, measured with CUDA events.
+// Time per position_step, attitude_step and rate_step call of the CUDA fleet, measured with CUDA events.
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -100,6 +101,33 @@ void benchmark(int n)
 	float *d_actuator = deviceScratch(4 * n);
 	float *d_torque = deviceScratch(3 * n);
 
+	// Velocity command in x at hover, 5 m above the origin.
+	std::vector<float> position(3 * n, 0.f), trajectory_sp(11 * n, NAN);
+
+	for (int i = 0; i < n; ++i) {
+		position[3 * i + 2] = -5.f;
+		trajectory_sp[11 * i + 3] = 1.f;
+		trajectory_sp[11 * i + 4] = trajectory_sp[11 * i + 5] = 0.f;
+		trajectory_sp[11 * i + 9] = 0.f;
+	}
+
+	float *d_position = deviceBuffer(position);
+	float *d_velocity = deviceBuffer(std::vector<float>(3 * n, 0.f));
+	float *d_heading = deviceBuffer(std::vector<float>(n, 0.f));
+	float *d_az = deviceBuffer(std::vector<float>(n, 0.f));
+	float *d_trajectory_sp = deviceBuffer(trajectory_sp);
+	float *d_q_sp_out = deviceScratch(4 * n);
+	float *d_thrust_sp_out = deviceScratch(3 * n);
+	float *d_yawspeed = deviceScratch(n);
+	float *d_hover_thrust = deviceScratch(n);
+	uint64_t time_us = 1000000;
+
+	const double position_us = microsecondsPerCall([&] {
+		time_us += 20000;
+		API_CALL(px4rl_cuda_position_step(fleet, d_position, d_velocity, d_heading, d_az, d_trajectory_sp, nullptr,
+						  0.02f, time_us, d_q_sp_out, d_thrust_sp_out, d_yawspeed, d_hover_thrust,
+						  nullptr, nullptr));
+	});
 	const double attitude_us = microsecondsPerCall([&] {
 		API_CALL(px4rl_cuda_attitude_step(fleet, d_q, d_q_sp, nullptr, d_thrust_sp, d_rates_sp, d_thrust_body,
 						  nullptr));
@@ -108,10 +136,12 @@ void benchmark(int n)
 		API_CALL(px4rl_cuda_rate_step(fleet, d_rates_sp, d_thrust_body, d_rates, d_accel, kDt, nullptr, d_motors,
 					      d_actuator, d_torque, nullptr));
 	});
-	std::printf("bench N=%6d: attitude_step %9.2f us/call, rate_step %9.2f us/call\n", n, attitude_us, rate_us);
+	std::printf("bench N=%6d: position_step %9.2f us/call, attitude_step %9.2f us/call, rate_step %9.2f us/call\n", n,
+		    position_us, attitude_us, rate_us);
 
 	for (float *p : {d_q, d_q_sp, d_thrust_sp, d_rates, d_accel, d_rates_sp, d_thrust_body, d_motors, d_actuator,
-			 d_torque}) {
+			 d_torque, d_position, d_velocity, d_heading, d_az, d_trajectory_sp, d_q_sp_out, d_thrust_sp_out,
+			 d_yawspeed, d_hover_thrust}) {
 		CUDA_CALL(cudaFree(p));
 	}
 

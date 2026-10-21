@@ -100,6 +100,42 @@ int rateStep(px4rl_cuda_fleet *f, Inputs &in, void *stream)
 				    nullptr, in.motors.get(), in.actuator.get(), in.torque.get(), stream);
 }
 
+// Hover at 5 m with a velocity command, so the position step produces a non-trivial setpoint.
+struct PositionInputs {
+	int n;
+	DeviceArray<float> position, velocity, heading, az, trajectory_sp;
+	DeviceArray<float> q_sp, thrust_sp, yawspeed, hover_thrust;
+	DeviceArray<uint8_t> outcome;
+
+	explicit PositionInputs(int count)
+		: n(count), position(3 * count), velocity(3 * count), heading(count), az(count), trajectory_sp(11 * count),
+		  q_sp(4 * count), thrust_sp(3 * count), yawspeed(count), hover_thrust(count), outcome(count)
+	{
+		std::vector<float> hp(3 * n, 0.f), hv(3 * n, 0.f), hh(n, 0.3f), ha(n, 0.f), hs(11 * n, NAN);
+
+		for (int i = 0; i < n; ++i) {
+			hp[3 * i + 2] = -5.f;
+			hs[11 * i + 3] = 1.f + 0.1f * static_cast<float>(i % 7);
+			hs[11 * i + 4] = hs[11 * i + 5] = 0.f;
+			hs[11 * i + 9] = 0.5f;
+		}
+
+		position.upload(hp);
+		velocity.upload(hv);
+		heading.upload(hh);
+		az.upload(ha);
+		trajectory_sp.upload(hs);
+	}
+};
+
+int positionStep(px4rl_cuda_fleet *f, PositionInputs &in, uint64_t time_us, void *stream, bool optional_outputs = true)
+{
+	return px4rl_cuda_position_step(f, in.position.get(), in.velocity.get(), in.heading.get(), in.az.get(),
+					in.trajectory_sp.get(), nullptr, 0.02f, time_us, in.q_sp.get(), in.thrust_sp.get(),
+					in.yawspeed.get(), optional_outputs ? in.hover_thrust.get() : nullptr,
+					optional_outputs ? in.outcome.get() : nullptr, stream);
+}
+
 px4rl_cuda_fleet *createFleet(int n)
 {
 	px4rl_cuda_fleet *f = nullptr;
@@ -165,11 +201,27 @@ TEST(CApi, ErrorPaths)
 	bad.num_rotors = PX4RL_MAX_ROTORS + 1;
 	EXPECT_NE(px4rl_cuda_fleet_reset(f, nullptr, &bad, 1, nullptr), 0);
 
+	// Position step: null fleet, required buffers.
+	PositionInputs position_in(8);
+	EXPECT_NE(positionStep(nullptr, position_in, 1000000u, nullptr), 0);
+	EXPECT_STRNE(px4rl_last_error(), "");
+
 	// Required buffers.
 	EXPECT_NE(px4rl_cuda_attitude_step(f, nullptr, in.q_sp.get(), nullptr, in.thrust_sp.get(), in.rates_sp.get(),
 					   in.thrust_body.get(), nullptr), 0);
 	EXPECT_NE(px4rl_cuda_rate_step(f, in.rates_sp.get(), in.thrust_body.get(), in.rates.get(), in.accel.get(), kDt,
 				       nullptr, nullptr, nullptr, nullptr, nullptr), 0);
+
+	EXPECT_NE(px4rl_cuda_position_step(f, nullptr, position_in.velocity.get(), position_in.heading.get(),
+					   position_in.az.get(), position_in.trajectory_sp.get(), nullptr, 0.02f, 1000000u,
+					   position_in.q_sp.get(), position_in.thrust_sp.get(), position_in.yawspeed.get(),
+					   nullptr, nullptr, nullptr), 0);
+	EXPECT_NE(px4rl_cuda_position_step(f, position_in.position.get(), position_in.velocity.get(),
+					   position_in.heading.get(), position_in.az.get(), position_in.trajectory_sp.get(),
+					   nullptr, 0.02f, 1000000u, position_in.q_sp.get(), position_in.thrust_sp.get(), nullptr,
+					   nullptr, nullptr, nullptr), 0);
+	EXPECT_NE(px4rl_cuda_attitude_step(f, in.q.get(), in.q_sp.get(), nullptr, nullptr, in.rates_sp.get(),
+					   in.thrust_body.get(), nullptr), 0);
 
 	// The fleet is still usable after rejected calls.
 	EXPECT_EQ(px4rl_cuda_fleet_reset(f, nullptr, params, 1, nullptr), 0) << px4rl_last_error();
@@ -191,6 +243,63 @@ TEST(CApi, OptionalOutputsMayBeNull)
 	CUDA_CALL(cudaDeviceSynchronize());
 	EXPECT_TRUE(allFinite(in.motors.download()));
 	EXPECT_EQ(px4rl_cuda_fleet_destroy(f), 0);
+}
+
+TEST(CApi, PositionStepOptionalOutputsMayBeNull)
+{
+	px4rl_cuda_fleet *f = createFleet(16);
+	ASSERT_NE(f, nullptr);
+	PositionInputs in(16);
+	EXPECT_EQ(positionStep(f, in, 1000000u, nullptr, false), 0) << px4rl_last_error();
+	CUDA_CALL(cudaDeviceSynchronize());
+	EXPECT_TRUE(allFinite(in.q_sp.download()));
+	EXPECT_TRUE(allFinite(in.thrust_sp.download()));
+	EXPECT_EQ(px4rl_cuda_fleet_destroy(f), 0);
+}
+
+TEST(CApi, AttitudeStepWithoutSetpointUsesPositionStepOutput)
+{
+	constexpr int n = 64;
+	px4rl_cuda_fleet *stored = createFleet(n);
+	px4rl_cuda_fleet *explicit_fleet = createFleet(n);
+	ASSERT_TRUE(stored && explicit_fleet);
+	PositionInputs position_a(n), position_b(n);
+	Inputs in_a(n), in_b(n);
+
+	ASSERT_EQ(positionStep(stored, position_a, 1000000u, nullptr), 0) << px4rl_last_error();
+	ASSERT_EQ(positionStep(explicit_fleet, position_b, 1000000u, nullptr), 0) << px4rl_last_error();
+
+	// Stored setpoint (yaw rate included) versus the same setpoint passed explicitly.
+	ASSERT_EQ(px4rl_cuda_attitude_step(stored, in_a.q.get(), nullptr, nullptr, position_a.thrust_sp.get(),
+					   in_a.rates_sp.get(), in_a.thrust_body.get(), nullptr), 0) << px4rl_last_error();
+	ASSERT_EQ(px4rl_cuda_attitude_step(explicit_fleet, in_b.q.get(), position_b.q_sp.get(), position_b.yawspeed.get(),
+					   position_b.thrust_sp.get(), in_b.rates_sp.get(), in_b.thrust_body.get(), nullptr),
+		  0) << px4rl_last_error();
+	CUDA_CALL(cudaDeviceSynchronize());
+
+	const std::vector<float> rates_stored = in_a.rates_sp.download();
+	const std::vector<float> rates_explicit = in_b.rates_sp.download();
+	ASSERT_TRUE(allFinite(rates_stored));
+	EXPECT_EQ(std::memcmp(rates_stored.data(), rates_explicit.data(), rates_stored.size() * sizeof(float)), 0);
+
+	// The command is a velocity step, so the setpoint is not the level one that a fresh fleet would use.
+	px4rl_cuda_fleet *fresh = createFleet(n);
+	Inputs in_fresh(n);
+	ASSERT_EQ(px4rl_cuda_attitude_step(fresh, in_fresh.q.get(), nullptr, nullptr, position_a.thrust_sp.get(),
+					   in_fresh.rates_sp.get(), in_fresh.thrust_body.get(), nullptr), 0);
+	CUDA_CALL(cudaDeviceSynchronize());
+	const std::vector<float> rates_fresh = in_fresh.rates_sp.download();
+	EXPECT_NE(std::memcmp(rates_stored.data(), rates_fresh.data(), rates_stored.size() * sizeof(float)), 0);
+
+	const std::vector<uint8_t> outcome = position_a.outcome.download();
+
+	for (uint8_t o : outcome) {
+		EXPECT_EQ(o, PX4RL_OUTCOME_OK);
+	}
+
+	EXPECT_EQ(px4rl_cuda_fleet_destroy(stored), 0);
+	EXPECT_EQ(px4rl_cuda_fleet_destroy(explicit_fleet), 0);
+	EXPECT_EQ(px4rl_cuda_fleet_destroy(fresh), 0);
 }
 
 TEST(CApi, NonDefaultStreamMatchesDefaultStream)
@@ -279,17 +388,20 @@ TEST(CApi, StepCallsAreGraphCapturable)
 	px4rl_cuda_fleet *f = createFleet(n);
 	ASSERT_NE(f, nullptr);
 	Inputs in(n);
+	PositionInputs position_in(n);
 
 	cudaStream_t stream = nullptr;
 	CUDA_CALL(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
 
 	// Warm up so lazy module loading happens outside the capture.
+	ASSERT_EQ(positionStep(f, position_in, 1000000u, stream), 0);
 	ASSERT_EQ(attitudeStep(f, in, stream), 0);
 	ASSERT_EQ(rateStep(f, in, stream), 0);
 	CUDA_CALL(cudaStreamSynchronize(stream));
 
 	// Any allocation or synchronisation inside a step call would invalidate the capture.
 	CUDA_CALL(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+	EXPECT_EQ(positionStep(f, position_in, 1020000u, stream), 0) << px4rl_last_error();
 	EXPECT_EQ(attitudeStep(f, in, stream), 0) << px4rl_last_error();
 	EXPECT_EQ(rateStep(f, in, stream), 0) << px4rl_last_error();
 	cudaGraph_t graph = nullptr;
@@ -304,6 +416,7 @@ TEST(CApi, StepCallsAreGraphCapturable)
 
 	CUDA_CALL(cudaStreamSynchronize(stream));
 	EXPECT_TRUE(allFinite(in.motors.download()));
+	EXPECT_TRUE(allFinite(position_in.q_sp.download()));
 
 	CUDA_CALL(cudaGraphExecDestroy(exec));
 	CUDA_CALL(cudaGraphDestroy(graph));

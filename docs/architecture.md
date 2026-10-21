@@ -98,11 +98,13 @@ The open-loop growth is driven by discontinuities: the allocator's saturation fl
 
 Benchmark: `bench/`, RTX 4090, CUDA 12.4. Times are µs per call for the whole fleet.
 
-| Vehicles | attitude step | rate → allocator → output step |
-|---|---|---|
-| 4 096 | 3.7 | 31 |
-| 16 384 | 7.6 | 67 |
-| 65 536 | 24 | 333 |
+| Vehicles | position step | attitude step | rate → allocator → output step |
+|---|---|---|---|
+| 4 096 | 19 | 4.5 | 49 |
+| 16 384 | 49 | 9.4 | 75 |
+| 65 536 | 202 | 29 | 370 |
+
+`Vehicle` is stored array-of-structures. Since the position loop was added it holds about 2 KB of controller state, and a rate step touches only part of it. Specialising the allocator to the actual rotor count and laying out hot state separately are the main levers for further speed.
 
 ## Verification
 

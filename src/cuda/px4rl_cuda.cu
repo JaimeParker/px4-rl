@@ -118,6 +118,15 @@ __global__ void initKernel(px4rl::Vehicle *vehicles, int n, const uint8_t *mask,
 	vehicles[i].configure(params[params_stride * i]);
 }
 
+__global__ void positionKernel(px4rl::Vehicle *vehicles, int n, px4rl::PositionStepBuffers buffers)
+{
+	const int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if (i < n) {
+		px4rl::positionStepAt(vehicles[i], i, buffers);
+	}
+}
+
 __global__ void attitudeKernel(px4rl::Vehicle *vehicles, int n, px4rl::AttitudeStepBuffers buffers)
 {
 	const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -301,6 +310,39 @@ int px4rl_cuda_fleet_reset(px4rl_cuda_fleet *f, const uint8_t *mask, const px4rl
 	return 0;
 }
 
+int px4rl_cuda_position_step(px4rl_cuda_fleet *f, const float *pos, const float *vel, const float *heading,
+			     const float *az, const float *traj_sp, const uint8_t *in_air, float dt, uint64_t time_us,
+			     float *q_sp_out, float *thrust_sp_body_out, float *yawspeed_out, float *hover_thrust_out,
+			     uint8_t *outcome_out, void *stream)
+{
+	if (f == nullptr) {
+		return failInvalid("px4rl_cuda_position_step: fleet is null");
+	}
+
+	if (pos == nullptr || vel == nullptr || heading == nullptr || az == nullptr || traj_sp == nullptr ||
+	    q_sp_out == nullptr || thrust_sp_body_out == nullptr || yawspeed_out == nullptr) {
+		return failInvalid("px4rl_cuda_position_step: required buffer is null");
+	}
+
+	DeviceScope scope(f->device);
+
+	if (scope.error() != cudaSuccess) {
+		return failCuda("cudaSetDevice", scope.error());
+	}
+
+	const px4rl::PositionStepBuffers buffers{pos,       vel,       heading,  az,           traj_sp,
+						 in_air,    dt,        time_us,  q_sp_out,     thrust_sp_body_out,
+						 yawspeed_out, hover_thrust_out, outcome_out};
+	positionKernel<<<blocksFor(f->n), kThreadsPerBlock, 0, static_cast<cudaStream_t>(stream)>>>(f->vehicles, f->n,
+												    buffers);
+
+	if (cudaError_t e = cudaGetLastError(); e != cudaSuccess) {
+		return failCuda("positionKernel launch", e);
+	}
+
+	return 0;
+}
+
 int px4rl_cuda_attitude_step(px4rl_cuda_fleet *f, const float *q, const float *q_sp, const float *yawspeed_ff,
 			     const float *thrust_sp_body, float *rates_sp_out, float *thrust_body_out, void *stream)
 {
@@ -308,8 +350,7 @@ int px4rl_cuda_attitude_step(px4rl_cuda_fleet *f, const float *q, const float *q
 		return failInvalid("px4rl_cuda_attitude_step: fleet is null");
 	}
 
-	if (q == nullptr || q_sp == nullptr || thrust_sp_body == nullptr || rates_sp_out == nullptr ||
-	    thrust_body_out == nullptr) {
+	if (q == nullptr || thrust_sp_body == nullptr || rates_sp_out == nullptr || thrust_body_out == nullptr) {
 		return failInvalid("px4rl_cuda_attitude_step: required buffer is null");
 	}
 

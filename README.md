@@ -23,7 +23,7 @@ as PX4 SITL: quantized PWM, then rotor-speed lag, then thrust and drag.
 | Component | CPU | CUDA |
 |---|---|---|
 | Attitude, rate, allocator, actuator output | ✓ | ✓ (batched fleet, C API) |
-| Position/velocity control, hover-thrust estimator | ✓ (vendored, unit-tested) | compiles; fleet integration in progress |
+| Position/velocity control, hover-thrust estimator | ✓ | ✓ (batched fleet, C API) |
 | Gazebo-faithful rotor model, ENU/FLU ↔ NED/FRD frames | ✓ | ✓ |
 | Iris airframe (PX4 SITL parameters) | ✓ | ✓ |
 | Python bindings (ctypes GPU, pybind11 CPU) | planned | planned |
@@ -68,7 +68,11 @@ px4rl_params params;
 px4rl_params_default(&params);
 px4rl_cuda_fleet_create(n, /*device*/ 0, &fleet);
 px4rl_cuda_fleet_reset(fleet, /*mask*/ NULL, &params, 1, stream);
-px4rl_cuda_attitude_step(fleet, q, q_sp, NULL, thrust_sp_body, rates_sp, thrust_body, stream);
+/* velocity + yaw: traj_sp rows are (pos[3], vel[3], acc[3], yaw, yawspeed) with NaN for unused fields */
+px4rl_cuda_position_step(fleet, pos, vel, heading, az, traj_sp, NULL, dt_pos, time_us,
+                         q_sp, thrust_sp_body, yawspeed, NULL, NULL, stream);
+px4rl_cuda_attitude_step(fleet, q, /*q_sp: use position_step's*/ NULL, NULL, thrust_sp_body,
+                         rates_sp, thrust_body, stream);
 px4rl_cuda_rate_step(fleet, rates_sp, thrust_body, rates, angular_accel, dt, NULL, motors, pwm, NULL, stream);
 ```
 
