@@ -1,0 +1,80 @@
+#include "px4rl/cpu_fleet.hpp"
+
+#include <stdexcept>
+#include <string>
+
+#include "px4rl/step_io.hpp"
+
+namespace px4rl {
+
+namespace {
+// Below this size the OpenMP fork/join costs more than the loop.
+constexpr int kMinParallelVehicles = 64;
+} // namespace
+
+CpuFleet::CpuFleet(int n)
+{
+	if (n < 1) {
+		throw std::invalid_argument("CpuFleet: n must be >= 1");
+	}
+
+	vehicles_.resize(static_cast<size_t>(n));
+	const px4rl_params defaults = defaultParams();
+
+	for (Vehicle &vehicle : vehicles_) {
+		vehicle.configure(defaults);
+	}
+}
+
+void CpuFleet::reset(const uint8_t *mask, const px4rl_params *params, int n_params)
+{
+	const int n = size();
+
+	if (params == nullptr || (n_params != 1 && n_params != n)) {
+		throw std::invalid_argument("CpuFleet::reset: n_params must be 1 or n");
+	}
+
+	for (int i = 0; i < n_params; ++i) {
+		if (const char *error = validateParams(params[i])) {
+			throw std::invalid_argument(std::string("CpuFleet::reset: ") + error);
+		}
+	}
+
+	const int stride = n_params == 1 ? 0 : 1;
+
+#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles)
+	for (int i = 0; i < n; ++i) {
+		if (mask == nullptr || mask[i] != 0) {
+			vehicles_[i] = Vehicle();
+			vehicles_[i].configure(params[stride * i]);
+		}
+	}
+}
+
+void CpuFleet::attitudeStep(const float *q, const float *q_sp, const float *yawspeed_ff, const float *thrust_sp_body,
+			    float *rates_sp_out, float *thrust_body_out)
+{
+	const AttitudeStepBuffers buffers{q, q_sp, yawspeed_ff, thrust_sp_body, rates_sp_out, thrust_body_out};
+	const int n = size();
+
+#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles)
+	for (int i = 0; i < n; ++i) {
+		attitudeStepAt(vehicles_[i], i, buffers);
+	}
+}
+
+void CpuFleet::rateStep(const float *rates_sp, const float *thrust_body, const float *rates,
+			const float *angular_accel, float dt, const uint8_t *landed, float *motors_out,
+			float *actuator_out, float *torque_sp_out)
+{
+	const RateStepBuffers buffers{rates_sp, thrust_body, rates, angular_accel, dt, landed, motors_out,
+				      actuator_out, torque_sp_out};
+	const int n = size();
+
+#pragma omp parallel for schedule(static) if (n >= kMinParallelVehicles)
+	for (int i = 0; i < n; ++i) {
+		rateStepAt(vehicles_[i], i, buffers);
+	}
+}
+
+} // namespace px4rl

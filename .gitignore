@@ -66,3 +66,13 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+results/
+
+# reference
+reference/
+
+# Internal planning docs (kept locally, not published)
+docs/internal/
+
+# Probe build outputs
+experiments/*/out/
