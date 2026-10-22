@@ -22,10 +22,10 @@
  * This file was modified from the original: see THIRD_PARTY_NOTICES.md.
  */
 // Port of the Gazebo Classic motor model that PX4 v1.16.2 SITL flies Iris with:
-//   PX4-SITL_gazebo-classic @ 70683dc, reference/gazebo_classic_iris/
-//     gazebo_motor_model.cpp   (GazeboMotorModel::UpdateForcesAndMoments, VelocityCallback)
-//     common.h                 (FirstOrderFilter)
-//     gazebo_mavlink_interface.cpp (handle_actuator_controls)
+//   PX4-SITL_gazebo-classic @ 70683dc
+//     src/gazebo_motor_model.cpp   (GazeboMotorModel::UpdateForcesAndMoments, VelocityCallback)
+//     include/common.h             (FirstOrderFilter)
+//     src/gazebo_mavlink_interface.cpp (handle_actuator_controls)
 //
 // One rotor per call, all in the body FLU frame. Numerics are float; Gazebo uses double, so results
 // differ from the plugin at the ~1e-7 relative level.
@@ -64,7 +64,7 @@ struct Wrench {
 
 /// PX4 SITL scaling of an integer PWM output to the actuator value u that goes to Gazebo:
 /// (pwm - PWM_SIM_PWM_MIN_MAGIC) / (PWM_SIM_PWM_MAX_MAGIC - PWM_SIM_PWM_MIN_MAGIC), with the magics
-/// 1000 and 2000 (reference/PX4-Autopilot/src/modules/simulation/pwm_out_sim/PWMSim.cpp:81 and
+/// 1000 and 2000 (PX4-Autopilot v1.16.2 src/modules/simulation/pwm_out_sim/PWMSim.cpp:81 and
 /// PWMSim.hpp:81-82). Feed it rate_step's actuator_out.
 PX4RL_HD inline float pwmToActuatorInput(float pwm)
 {

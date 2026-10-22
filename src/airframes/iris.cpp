@@ -1,6 +1,6 @@
-// Gazebo Classic Iris plant: reference/gazebo_classic_iris/iris.sdf.jinja (PX4-SITL_gazebo-classic
-// @ 70683dc). Raw values with their sources are tabulated in docs/iris-params-sources.md (section
-// numbers below refer to it). Values are float; the SDF values are decimal and double.
+// Gazebo Classic Iris plant: models/iris/iris.sdf.jinja of PX4-SITL_gazebo-classic @ 70683dc. Raw
+// values with their sources are tabulated in docs/iris-params-sources.md (section numbers below refer to
+// it). Values are float; the SDF values are decimal and double.
 //
 // Rotor index mapping (PX4 output index -> SDF rotor), derived end to end:
 //   PX4 actuator_outputs.output[i] -> HIL_ACTUATOR_CONTROLS controls[i]

@@ -1,5 +1,5 @@
 // Conversions between the Gazebo / Isaac Lab convention (world ENU, body FLU) and PX4's (world NED,
-// body FRD). Mirrors the frame notes of reference/gazebo_classic_iris/common.h:213-237
+// body FRD). Mirrors the frame notes of PX4-SITL_gazebo-classic@70683dc include/common.h:213-237
 // (q_ENU_to_NED = (0, 0.70711, 0.70711, 0), q_FLU_to_FRD = (0, 1, 0, 0), both symmetric), with the
 // exact sqrt(1/2) instead of the rounded 0.70711.
 //

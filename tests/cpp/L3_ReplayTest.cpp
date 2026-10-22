@@ -10,7 +10,7 @@
  *
  * L3 PX4 SITL Log Replay Validation.
  *
- * Reads a CSV trace extracted from a PX4 SITL ULog (via extract_ulog_trace.py)
+ * Reads a CSV trace extracted from a PX4 SITL ULog (via tools/extract_ulog_trace.py)
  * and replays each timestep through the extracted control pipeline.  Compares
  * computed outputs to PX4's logged values at each stage to validate equivalence.
  *

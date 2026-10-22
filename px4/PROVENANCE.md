@@ -5,6 +5,7 @@ This directory has two origins.
 1. **Inner loop**: attitude, rate, allocator, actuator output, and the matrix/mathlib subset. It comes from *px4_stack*, an earlier standalone extraction of the PX4-Autopilot **v1.16.0** inner-loop modules by the px4-rl author (not published separately).
    - px4_stack removed the PX4 framework dependencies (uORB, parameter system, work queues) and added data-driven wrappers (`*Wrapper.*`, `*Types.hpp`) and the thrust-curve/PWM output stage.
    - It ships with its own test suite: unit tests, L2 equivalence vectors, and an L3 replay of a PX4 SITL log, in `tests/cpp/`.
+   - The L3 trace `tests/cpp/data/l3_trace.csv` was extracted with `tools/extract_ulog_trace.py` from a ULog of a PX4 SITL flight of the Gazebo Classic Iris with default gains (hover and manoeuvres). The ULog itself is not included.
 2. **Position loop and hover-thrust estimator**: vendored directly from PX4-Autopilot **v1.16.2**.
 
 The control-related modules are identical in v1.16.0 and v1.16.2.

@@ -161,6 +161,7 @@ See `docs/architecture.md` and `experiments/nvcc_probe/`.
 | `tests/` | Ported PX4 and px4_stack tests, fleet, parity, plant, C API, CMake-consumer tests |
 | `bench/` | GPU throughput benchmark |
 | `tools/annotate_hd.py` | Inserts the execution-space macro into vendored sources |
+| `tools/extract_ulog_trace.py` | Extracts the inner-loop trace used by the L3 replay test from a PX4 ULog |
 | `experiments/nvcc_probe/` | The original device-compilation feasibility probe |
 | `docs/` | Architecture, Iris parameter sources |
 
