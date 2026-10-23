@@ -28,6 +28,7 @@ as PX4 SITL: quantized PWM, then rotor-speed lag, then thrust and drag.
 | Rotor plant in the fleet (`rotor_step`: PWM → wrench) | ✓ | ✓ (batched fleet, C API) |
 | Iris airframe (PX4 SITL parameters, controller and plant) | ✓ | ✓ |
 | Python package: `CpuFleet` and single-vehicle classes (pybind11, numpy), `CudaFleet` (ctypes, torch) | ✓ | ✓ |
+| Offboard command modes over the GPU fleet (`px4rl.offboard`, torch) | | ✓ |
 
 ## Build
 
@@ -140,6 +141,18 @@ graph.replay()                            # the four steps in one launch; wrench
 ```
 
 `px4rl.hover_thrust(params, plant, body, gravity)` (C: `px4rl_hover_thrust`, `include/px4rl/airframes.h`) returns the thrust at which a vehicle hovers, in PX4's `MPC_THR_HOVER` units (Iris: 0.6935); seed `params.mpc_thr_hover` with it to start an episode in steady flight.
+
+**Offboard command modes.** `px4rl.offboard.OffboardController(fleet, position_dt, rate_dt)` runs the chain above for one command mode per call, as PX4's offboard interface does, and keeps what every caller needs besides the fleet: the time counter, the setpoint held between commands, and the vertical and angular accelerations as finite differences of the velocity and the body rates. Modes: `position` / `velocity` / `acceleration` (a `px4rl.setpoints` row through `position_step`), `attitude` (`q_sp` and collective thrust to `attitude_step`), `stabilized` (roll, pitch, yaw rate and thrust; the yaw setpoint is integrated as in PX4's Stabilized mode) and `body_rate` (rates and thrust straight to `rate_step`). Inputs are a `VehicleState(position, velocity, q, rates)` in NED / FRD; the wrench comes back in body FLU, as from `rotor_step`. It allocates small temporaries, so unlike the bare fleet it is not meant for CUDA-graph capture.
+
+```python
+from px4rl.offboard import OffboardController, VehicleState
+
+controller = OffboardController(fleet, position_dt=0.02, rate_dt=0.004)
+state = VehicleState(z3, z3, q, z3)                     # position, velocity (NED), q (FRD -> NED), rates (FRD)
+controller.command("body_rate", state, rates_sp=z3, thrust=torch.full((n,), 0.69, device="cuda"))
+for _ in range(5):                                      # the setpoint is held over the rate periods
+    wrench = controller.physics(state, body_velocity_flu=z3, body_rates_flu=z3)
+```
 
 Single vehicles, for code that does not batch: `px4rl.Vehicle` (the whole chain), `AttitudeController`, `RateController`, `ControlAllocator`, `ActuatorOutput`, `PositionController` and `HoverThrustEstimator`, each configured from a `Params` and taking numpy arrays or tuples.
 

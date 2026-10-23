@@ -1,7 +1,8 @@
 """PX4-faithful multirotor control and rotor dynamics for reinforcement learning.
 
 `import px4rl` gives the CPU classes (numpy), the parameter structs and factories, and the setpoint builders. It
-does not import torch. The batched GPU fleet is `px4rl.cuda.CudaFleet`.
+does not import torch. The batched GPU fleet is `px4rl.cuda.CudaFleet`; `px4rl.offboard.OffboardController` runs
+PX4's offboard command modes on it.
 """
 from . import _lib, _structs, setpoints
 from ._results import (

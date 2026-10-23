@@ -9,7 +9,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "BSD-3-Clause" }
 dynamic = ["version"]
-# torch is needed only by px4rl.cuda and is deliberately not a dependency.
+# torch is needed only by px4rl.cuda and px4rl.offboard and is deliberately not a dependency.
 dependencies = ["numpy"]
 
 [project.optional-dependencies]
